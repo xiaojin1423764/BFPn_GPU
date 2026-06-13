@@ -1,0 +1,24 @@
+# Build outputs
+build/
+cmake/
+BFPn_CPU_Solver/serial_bfpn
+
+# Local OS/editor files
+.DS_Store
+.cursor/
+
+# Runtime outputs and plots
+dose_output.txt
+dose_plot.png
+
+# Profiling reports/databases
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# Windows alternate data stream metadata copied onto Linux filesystems
+*:Zone.Identifier
+
+# Local agent state
+.agents/
+.codex/

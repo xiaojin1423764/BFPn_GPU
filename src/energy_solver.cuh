@@ -1,0 +1,75 @@
+// src/energy_solver.cuh
+#ifndef ENERGY_SOLVER_CUH
+#define ENERGY_SOLVER_CUH
+
+#include "utils.cuh"
+
+// PCR (Parallel Cyclic Reduction) 三对角求解器
+template<int BLOCK_SIZE>
+class PCRSolver {
+public:
+    static void solve(
+        double* x,
+        const double* a, const double* b, const double* c, const double* d,
+        int n_systems, int n_equations,
+        cudaStream_t stream = 0
+    );
+};
+
+// 能量沉积主求解器
+class EnergyDepositionSolver {
+private:
+    int max_batch;
+    int n_equations;  // Ng
+    
+    //  pitched 存储的三对角矩阵
+    PitchedArray<double> d_a;  // 下对角线
+    PitchedArray<double> d_b;  // 主对角线
+    PitchedArray<double> d_c;  // 上对角线
+    PitchedArray<double> d_d;  // 右端项
+    PitchedArray<double> d_x;  // 解
+    
+    // 工作缓冲区
+    DeviceArray<double> d_rhs_buffer;
+    
+    // cuBLAS句柄
+    cublasHandle_t cublas_handle;
+
+public:
+    EnergyDepositionSolver(int max_batch_size, int n_eqs, cublasHandle_t handle);
+    ~EnergyDepositionSolver() = default;
+    
+    // 构建并求解三对角系统
+    void solve(
+        double* F, double* f_F,
+        const double* F_half, const double* f_F_half,
+        const double* S_s, const double* sigma_c, const double* T_c,
+        double dt, double dg,
+        int nyz, int NmuNom,
+        bool is_secondary, const double* source_term,
+        cudaStream_t stream = 0
+    );
+    
+    // 批量求解
+    void solveBatch(
+        double* F, double* f_F,
+        const double* F_half, const double* f_F_half,
+        const double* S_s, const double* sigma_c, const double* T_c,
+        double dt, double dg,
+        int nyz, int NmuNom, int batch_start, int batch_size,
+        bool is_secondary, const double* source_term,
+        cudaStream_t stream = 0
+    );
+
+private:
+    void buildSystem(
+        double* a, double* b, double* c, double* d,
+        const double* F_half, const double* f_F_half,
+        const double* S_s, const double* sigma_c, const double* T_c,
+        double dt, double dg,
+        int nyz, int pos, int ang, int Ng,
+        bool is_secondary, const double* source_term
+    );
+};
+
+#endif
