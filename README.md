@@ -119,6 +119,40 @@ The current `dose_output.txt` is only superficially similar to an IDD curve beca
 
 For a faithful reproduction, the next major milestone is to compute and output local energy deposition and IDD according to the paper's dose definition.
 
+## Roadmap Toward Paper-Equivalent Results
+
+The current scalar `dose_output.txt` cannot be turned into the paper's IDD curve by plotting
+or reduction changes alone. The solver must first implement the paper's energy deposition
+and output path.
+
+Recommended implementation order:
+
+1. Add paper-style output buffers and files.
+   - Compute local `Edep_p(y,z)`, `Edep_s(y,z)`, and `D(y,z) = Edep(y,z) / rho(y,z)` at each
+     depth.
+   - Write `idd_output.txt` with columns `x IDD`, where `IDD(x) = integral integral D(x,y,z) dy dz`.
+   - Add optional `spot_x_<depth>.txt` outputs for selected `YZ` dose planes.
+
+2. Replace the simplified energy attenuation model.
+   - The current kernel uses `Fnew = Fold * exp(-sigma * dt)`.
+   - The paper uses a second-order DG discretization in energy with two coefficients per group,
+     Crank-Nicolson updates, stopping power `S(E)`, straggling `T(E)`, and catastrophic loss
+     `sigma_c,t`.
+   - This step is required before expecting a Bragg peak or paper-like IDD.
+
+3. Change the depth step to the paper's Strang splitting order.
+   - Target sequence: energy half step, spatial transport half step, angular diffusion full step,
+     spatial transport half step, energy half step.
+   - Keep changes staged so each subsystem can be validated independently.
+
+4. Upgrade transport and secondary physics.
+   - Replace first-order upwind transport with the paper's second-order MUSCL fluxes.
+   - Implement catastrophic-scattering source terms for secondary protons using
+     `sigma_c,s`, `sigma_c,t`, and transition matrices.
+   - Validate angular diffusion semantics and move toward the paper's `20x20` angular grid.
+
+See `TODO.md` for the detailed paper reproduction roadmap.
+
 ## Profiling
 
 Nsight Systems small run:
@@ -150,4 +184,3 @@ ncu --target-processes all --set basic \
 ```
 
 Current profiling conclusion: the main performance bottleneck is excessive launch count in angular diffusion. The code performs many tiny `11x11` FFTs one slice at a time. Replace this with batched cuFFT before optimizing individual kernels.
-

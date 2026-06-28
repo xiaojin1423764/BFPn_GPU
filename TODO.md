@@ -38,6 +38,61 @@
   - Spot distribution heatmaps.
   - Optional comparison against FLUKA/reference data.
 
+## Paper Reproduction Roadmap
+
+The current solver is a prototype, not a paper-equivalent implementation. The main mismatch is
+not plotting or reduction performance; it is that the current energy step and dose output are not
+the model used in the paper.
+
+- [ ] Build the paper-style output path first.
+  - Add depth-local buffers for primary and secondary energy deposition, e.g. `Edep_p(y,z)`,
+    `Edep_s(y,z)`, and `D(y,z)`.
+  - Output `idd_output.txt` with columns `x IDD`.
+  - Optionally output `spot_x_<depth>.txt` for selected `YZ` dose planes.
+  - Keep `dose_output.txt` only as a smoke-test scalar until it is removed or renamed.
+
+- [ ] Replace the scalar energy-group state with second-order DG energy coefficients.
+  - Current layout is effectively `F[Ng][nyz][NmuNom]`.
+  - Paper energy discretization uses two DG coefficients per group: `psi_g^1`, `psi_g^2`.
+  - Introduce a layout such as `F[2][Ng][nyz][NmuNom]` or `F[Ng][2][nyz][NmuNom]`.
+
+- [ ] Implement the paper DG/CN energy subsystem before expecting a Bragg peak.
+  - Current `energyAttenuationKernel` uses `Fnew = Fold * exp(-sigma * dt)`.
+  - Paper equation `(15)` includes stopping power `S(E)`, straggling `T(E)`, catastrophic loss
+    `sigma_c,t`, DG interface fluxes, and CN updates.
+  - Compute primary energy deposition from paper equation `(24)`, then add the corresponding
+    secondary term when secondary transport is implemented.
+
+- [ ] Change `stepPrimary()` to the paper's second-order Strang depth splitting.
+  - Target order: energy half step, spatial transport half step, angular diffusion full step,
+    spatial transport half step, energy half step.
+  - This corresponds to the paper's `L3/L4`, `L1`, `L2`, `L1`, `L3/L4` sequence.
+  - Use the same structure for secondary protons once the source term is available.
+
+- [ ] Defer paper-level spatial transport until the energy/dose path is correct.
+  - Current transport is first-order upwind.
+  - Paper uses second-order MUSCL fluxes in `y,z`.
+  - Implement MUSCL after `idd_output.txt` is produced from the DG/CN energy path, so changes
+    can be validated one subsystem at a time.
+
+- [ ] Treat the current FFT angular diffusion as an approximation until validated.
+  - Batched cuFFT is a performance fix, but the paper uses a specific CN discretization of
+    the Fokker-Planck angular operator.
+  - Paper benchmark settings use `20x20` angular grid; current default is `11x11`.
+  - Verify angular boundary conditions and document whether FFT semantics match the paper.
+
+- [ ] Implement catastrophic-scattering secondary source.
+  - Current `computeSource()` clears the source to zero.
+  - Paper uses `sigma_c,s` built from `sigma_c,t * P(g' -> g) * P_angle((u',v') -> (u,v))`.
+  - Load or generate `sigma_c,s`, `sigma_c,t`, and transition matrices before reproducing
+    secondary-dose comparisons.
+
+- [ ] Validate in stages.
+  - Stage 1: primary-only IDD with DG/CN energy and current transport/angular approximations.
+  - Stage 2: add MUSCL transport and compare convergence in depth and energy.
+  - Stage 3: add secondary source and compare water/bone/air IDD.
+  - Stage 4: reproduce BP, P90, D90, and D20 positions from paper Table 2.
+
 ## Numerical Model Completeness
 
 - [ ] Replace simplified energy attenuation with paper-level energy discretization.
@@ -150,4 +205,3 @@
   - Use target-specific include directories.
   - Use target-specific compile options instead of global `CMAKE_CUDA_FLAGS`.
   - Make CUDA architecture explicit in documentation.
-

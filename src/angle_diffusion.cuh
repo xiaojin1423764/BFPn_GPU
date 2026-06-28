@@ -10,6 +10,11 @@ class AngleDiffusionSolver {
 private:
     int Nmu, Nom;
     int n_angle;
+    int planned_batch;
+    int planned_ng;
+    int planned_nyz;
+    double cached_du;
+    double cached_dv;
     
     // FFT计划
     cufftHandle plan_forward;

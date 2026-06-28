@@ -59,6 +59,7 @@ private:
     DeviceArray<double> d_F1, d_f_F1;     // 二次质子
     DeviceArray<double> d_F_tot, d_f_Ftot;
     DeviceArray<double> d_source;          // 碰撞源项
+    DeviceArray<double> d_reduction_sums;  // GPU归约临时缓冲
     
     // 物理量数组
     DeviceArray<double> d_mu;              // 截面数据 [Ng][3]
