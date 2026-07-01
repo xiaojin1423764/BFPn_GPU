@@ -95,10 +95,10 @@ private:
     // Out-of-core streaming state for full-grid development.
     DeviceArray<double> d_stream_F, d_stream_f_F;
     DeviceArray<double> d_stream_F1, d_stream_f_F1;
+    DeviceArray<double> d_stream_primary_F, d_stream_primary_f_F;
     std::string stream_F_path, stream_f_F_path;
     std::string stream_F1_path, stream_f_F1_path;
     mutable std::unordered_map<std::string, int> stream_fds;
-    std::vector<double> h_stream_ker_e1, h_stream_ker_e2, h_stream_ker_v;
 
 public:
     BFPnSolver(const GridParams& g, const PhysicsParams& p);

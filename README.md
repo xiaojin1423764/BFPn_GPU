@@ -21,6 +21,8 @@ Implemented at prototype level:
   power, catastrophic loss, and optional straggling terms.
 - Catastrophic secondary source in the full in-memory path using the
   `ker_e1/ker_e2` energy kernels and `ker_v` angular kernel.
+- Streaming full-state mode with the catastrophic secondary source evaluated
+  inside each GPU lane chunk using the same energy/angle kernels.
 - Paper-facing integrated depth dose output in `idd_output.txt`.
 - BP/P90/D90/D20 analysis script for Table 2 style comparisons.
 
@@ -29,7 +31,8 @@ Not yet complete:
 - Formal convergence validation of the Eq. `(22)` spatial transport substep.
 - Full paper-grid `80x80x20x20` full-state run on 16 GB GPUs without streaming
   performance work.
-- Streaming out-of-core performance tuning for full secondary source parity.
+- Streaming out-of-core performance tuning beyond the current disk-backed
+  energy-major layout.
 - Air and heterogeneous material validation.
 
 ## Requirements
@@ -144,6 +147,9 @@ Run the full primary/secondary state in out-of-core streaming mode:
 files and moves only chunks through the GPU. This avoids the full-mode GPU OOM
 and avoids allocating tens of GiB of RAM, but it is currently disk-I/O bound on
 the paper grid. Use it first on smaller grids to validate full-state behavior.
+The streaming secondary source is computed by a CUDA kernel inside each
+cell-aligned lane chunk; `--lane-chunk` is automatically rounded down to a
+whole number of angular blocks, with a minimum of one full angular block.
 Add `--primary-only` to halve the backing files and skip secondary evolution:
 
 ```bash
@@ -244,7 +250,8 @@ work. The full in-memory Eq. `(15)` path is validated for water/bone 100 and
 230 MeV on the fine development grid above. Remaining caveats are mainly grid
 fidelity and model coverage: the paper's full transverse/angular grid does not
 fit the current full layout on a 16 GB GPU, air/heterogeneous cases still need
-validation, and streaming mode is formula-aligned but still disk-I/O bound.
+validation, and streaming mode now computes the secondary source on GPU chunks
+but is still disk-I/O bound.
 
 Plot the current IDD history:
 
@@ -358,8 +365,16 @@ Recommended implementation order:
      predictor-corrector CN update.
    - The full in-memory secondary source uses energy/angle transition kernels.
    - The out-of-core streaming path uses the same energy/angle transition
-     source formula but is still much slower than full in-memory mode.
+     source formula in a GPU chunk kernel, but its backing files are still
+     energy-major and disk-I/O bound.
    - Validate convergence toward the paper's `20x20` angular grid.
+
+5. Optimize streaming I/O layout.
+   - Current backing files are energy-major, so a secondary source chunk still
+     reads every energy group for each lane chunk.
+   - The next performance step is a cell-major backing layout or an async
+     staging layer that can read all angles/energies for contiguous cells with
+     fewer small `pread` calls.
 
 See `TODO.md` for the detailed paper reproduction roadmap.
 

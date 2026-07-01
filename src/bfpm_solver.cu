@@ -33,6 +33,13 @@ size_t checkedMul(size_t a, size_t b, const char* label) {
     return a * b;
 }
 
+size_t alignedLaneChunk(size_t requested, size_t n_angle) {
+    if (n_angle == 0) {
+        return std::max<size_t>(1, requested);
+    }
+    return std::max(n_angle, (std::max<size_t>(1, requested) / n_angle) * n_angle);
+}
+
 struct ElementFraction {
     int Z;
     double weight;
@@ -444,6 +451,49 @@ __global__ void streamingEnergyDgCnKernel(
     }
 }
 
+__global__ void streamingSecondarySourceKernel(
+    const double* primary_F,
+    const double* primary_f,
+    double* source_F,
+    const double* ker_e1,
+    const double* ker_e2,
+    const double* ker_v,
+    int Ng,
+    int lanes,
+    size_t lane0,
+    int NmuNom,
+    double dg
+) {
+    long long total = static_cast<long long>(Ng) * lanes;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    int out_e = static_cast<int>(gid / lanes);
+    int lane = static_cast<int>(gid - static_cast<long long>(out_e) * lanes);
+    int out_ang = static_cast<int>((lane0 + static_cast<size_t>(lane)) % NmuNom);
+    int lane_base = lane - out_ang;
+
+    double q1 = 0.0;
+    double q2 = 0.0;
+    for (int src_e = 0; src_e < Ng; ++src_e) {
+        double e1 = ker_e1[static_cast<long long>(out_e) * Ng + src_e];
+        double e2 = ker_e2[static_cast<long long>(out_e) * Ng + src_e];
+        if (e1 == 0.0 && e2 == 0.0) continue;
+
+        const double* kv = ker_v + static_cast<long long>(src_e) * NmuNom * NmuNom;
+        for (int in_ang = 0; in_ang < NmuNom; ++in_ang) {
+            int src_lane = lane_base + in_ang;
+            if (src_lane < 0 || src_lane >= lanes) continue;
+            double w = kv[static_cast<long long>(in_ang) * NmuNom + out_ang];
+            if (w == 0.0) continue;
+            long long src = static_cast<long long>(src_e) * lanes + src_lane;
+            q1 += max(primary_F[src], 0.0) * e1 * w;
+            q2 += primary_f[src] * e2 * w;
+        }
+    }
+    source_F[gid] = dg * (q1 + q2 / 3.0);
+}
+
 __global__ void initializeLiteDistributionKernel(
     double* F,
     const double* Omend,
@@ -615,7 +665,9 @@ void BFPnSolver::allocateMemory() {
     size_t total_size = nyz * grid.Ng * n_angle;
 
     if (phys.streaming_full) {
-        size_t lane_chunk = static_cast<size_t>(std::max(1, phys.streaming_lane_chunk));
+        size_t lane_chunk = alignedLaneChunk(
+            static_cast<size_t>(std::max(1, phys.streaming_lane_chunk)),
+            n_angle);
         size_t energy_chunk = static_cast<size_t>(std::max(1, phys.streaming_energy_chunk));
         size_t energy_chunk_size = energy_chunk * nyz * n_angle;
         size_t lane_chunk_size = static_cast<size_t>(grid.Ng) * lane_chunk;
@@ -625,6 +677,8 @@ void BFPnSolver::allocateMemory() {
         d_stream_f_F.allocate(stream_size);
         d_stream_F1.allocate(stream_size);
         d_stream_f_F1.allocate(stream_size);
+        d_stream_primary_F.allocate(stream_size);
+        d_stream_primary_f_F.allocate(stream_size);
 
         constexpr int reduction_block_size = 256;
         size_t reduction_blocks = (stream_size + reduction_block_size * 2 - 1) /
@@ -716,7 +770,9 @@ void BFPnSolver::preflightMemory() const {
                                 "streaming angle kernel bytes");
         estimated += checkedMul(n_angle, sizeof(double), "angle helper arrays") * 4;
     } else if (phys.streaming_full) {
-        const size_t lane_chunk = static_cast<size_t>(std::max(1, phys.streaming_lane_chunk));
+        const size_t lane_chunk = alignedLaneChunk(
+            static_cast<size_t>(std::max(1, phys.streaming_lane_chunk)),
+            n_angle);
         const size_t energy_chunk = static_cast<size_t>(std::max(1, phys.streaming_energy_chunk));
         const size_t energy_chunk_cells = checkedMul(checkedMul(energy_chunk, nyz, "stream energy chunk"),
                                                      n_angle,
@@ -727,8 +783,15 @@ void BFPnSolver::preflightMemory() const {
         const size_t max_chunk_cells = std::max(energy_chunk_cells, lane_chunk_cells);
         const size_t stream_array = checkedMul(max_chunk_cells, sizeof(double), "stream chunk bytes");
 
-        estimated += checkedMul(stream_array, 4, "stream F/f/F1/f1 chunk buffers");
+        estimated += checkedMul(stream_array, 6, "stream F/f/F1/f1/source chunk buffers");
+        estimated += checkedMul((max_chunk_cells + 511) / 512, sizeof(double), "stream reduction buffer");
         estimated += checkedMul(static_cast<size_t>(grid.Ng), sizeof(double), "physics arrays") * 5;
+        estimated += checkedMul(checkedMul(static_cast<size_t>(grid.Ng), static_cast<size_t>(grid.Ng), "stream energy kernels"),
+                                3 * sizeof(double),
+                                "stream energy kernel bytes");
+        estimated += checkedMul(checkedMul(static_cast<size_t>(grid.Ng), n_angle, "stream angle kernel"),
+                                checkedMul(n_angle, sizeof(double), "stream angle kernel bytes"),
+                                "stream angle kernel bytes");
         estimated += checkedMul(n_angle, sizeof(double), "angle helper arrays") * 4;
         estimated += checkedMul(static_cast<size_t>(grid.Ng), n_angle, "angle factor")
                    * sizeof(cufftDoubleComplex);
@@ -1383,24 +1446,17 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
     const size_t nyz = static_cast<size_t>(grid.Ny + 1) * (grid.Nz + 1);
     const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
     const size_t n_per_E = nyz * n_angle;
-    const int lane_chunk = std::max(1, phys.streaming_lane_chunk);
-    if (is_secondary) {
-        if (h_stream_ker_e1.empty()) {
-            h_stream_ker_e1.resize(static_cast<size_t>(grid.Ng) * grid.Ng);
-            h_stream_ker_e2.resize(static_cast<size_t>(grid.Ng) * grid.Ng);
-            h_stream_ker_v.resize(static_cast<size_t>(grid.Ng) * n_angle * n_angle);
-            d_ker_e1.copyToHost(h_stream_ker_e1.data(), h_stream_ker_e1.size());
-            d_ker_e2.copyToHost(h_stream_ker_e2.data(), h_stream_ker_e2.size());
-            d_ker_v.copyToHost(h_stream_ker_v.data(), h_stream_ker_v.size());
-        }
-    }
+    const size_t requested_lane_chunk = static_cast<size_t>(std::max(1, phys.streaming_lane_chunk));
+    const size_t lane_chunk = alignedLaneChunk(requested_lane_chunk, n_angle);
 
     constexpr int block_size = 256;
-    for (size_t lane0 = 0; lane0 < n_per_E; lane0 += static_cast<size_t>(lane_chunk)) {
-        int lanes = static_cast<int>(std::min(static_cast<size_t>(lane_chunk), n_per_E - lane0));
+    for (size_t lane0 = 0; lane0 < n_per_E; lane0 += lane_chunk) {
+        int lanes = static_cast<int>(std::min(lane_chunk, n_per_E - lane0));
         size_t chunk_size = static_cast<size_t>(grid.Ng) * lanes;
         std::vector<double> h_lane(chunk_size);
         std::vector<double> h_f_lane(chunk_size);
+        std::vector<double> h_primary_lane;
+        std::vector<double> h_primary_f_lane;
 
         for (int ek = 0; ek < grid.Ng; ++ek) {
             size_t src = static_cast<size_t>(ek) * n_per_E + lane0;
@@ -1418,63 +1474,46 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                               cudaMemcpyHostToDevice));
 
         if (is_secondary && primary_F_path && primary_f_F_path) {
-            // Eq. (10b) / Remark 1 source term using the same energy-angle
-            // transition kernels as the full in-memory secondary path.
-            std::vector<double> h_source(chunk_size);
-            std::vector<double> h_cell_primary(static_cast<size_t>(grid.Ng) * n_angle);
-            std::vector<double> h_cell_primary_f(static_cast<size_t>(grid.Ng) * n_angle);
-            size_t loaded_cell = static_cast<size_t>(-1);
-
-            for (int out_e = 0; out_e < grid.Ng; ++out_e) {
-                for (int l = 0; l < lanes; ++l) {
-                    size_t global_lane = lane0 + static_cast<size_t>(l);
-                    size_t cell = global_lane / n_angle;
-                    int out_ang = static_cast<int>(global_lane % n_angle);
-
-                    if (cell != loaded_cell) {
-                        for (int src_e = 0; src_e < grid.Ng; ++src_e) {
-                            size_t base = static_cast<size_t>(src_e) * n_per_E + cell * n_angle;
-                            readStore(*primary_F_path,
-                                      base,
-                                      h_cell_primary.data() + static_cast<size_t>(src_e) * n_angle,
-                                      n_angle);
-                            readStore(*primary_f_F_path,
-                                      base,
-                                      h_cell_primary_f.data() + static_cast<size_t>(src_e) * n_angle,
-                                      n_angle);
-                        }
-                        loaded_cell = cell;
-                    }
-
-                    double q1 = 0.0;
-                    double q2 = 0.0;
-                    for (int src_e = 0; src_e < grid.Ng; ++src_e) {
-                        double e1 = h_stream_ker_e1[static_cast<size_t>(out_e) * grid.Ng + src_e];
-                        double e2 = h_stream_ker_e2[static_cast<size_t>(out_e) * grid.Ng + src_e];
-                        if (e1 == 0.0 && e2 == 0.0) continue;
-                        const double* kv = h_stream_ker_v.data() + static_cast<size_t>(src_e) * n_angle * n_angle;
-                        for (size_t in_ang = 0; in_ang < n_angle; ++in_ang) {
-                            double w = kv[in_ang * n_angle + out_ang];
-                            if (w == 0.0) continue;
-                            size_t src = static_cast<size_t>(src_e) * n_angle + in_ang;
-                            q1 += std::max(h_cell_primary[src], 0.0) * e1 * w;
-                            q2 += h_cell_primary_f[src] * e2 * w;
-                        }
-                    }
-                    h_source[static_cast<size_t>(out_e) * lanes + l] = grid.dg * (q1 + q2 / 3.0);
-                }
+            h_primary_lane.resize(chunk_size);
+            h_primary_f_lane.resize(chunk_size);
+            for (int ek = 0; ek < grid.Ng; ++ek) {
+                size_t src = static_cast<size_t>(ek) * n_per_E + lane0;
+                size_t dst = static_cast<size_t>(ek) * lanes;
+                readStore(*primary_F_path, src, h_primary_lane.data() + dst, lanes);
+                readStore(*primary_f_F_path, src, h_primary_f_lane.data() + dst, lanes);
             }
             CUDA_CHECK(cudaMemcpy(d_stream_F1.data(),
-                                  h_source.data(),
+                                  h_primary_lane.data(),
                                   chunk_size * sizeof(double),
                                   cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_stream_primary_f_F.data(),
+                                  h_primary_f_lane.data(),
+                                  chunk_size * sizeof(double),
+                                  cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(d_stream_primary_F.data(), 0, chunk_size * sizeof(double)));
+
+            int source_grid = static_cast<int>((chunk_size + block_size - 1) / block_size);
+            streamingSecondarySourceKernel<<<source_grid, block_size>>>(
+                d_stream_F1.data(),
+                d_stream_primary_f_F.data(),
+                d_stream_primary_F.data(),
+                d_ker_e1.data(),
+                d_ker_e2.data(),
+                d_ker_v.data(),
+                grid.Ng,
+                lanes,
+                lane0,
+                static_cast<int>(n_angle),
+                grid.dg
+            );
+            CUDA_CHECK(cudaGetLastError());
         }
 
         int grid_size = static_cast<int>((lanes + block_size - 1) / block_size);
         streamingEnergyDgCnKernel<<<grid_size, block_size>>>(
             d_stream_F.data(),
             d_stream_f_F.data(),
-            is_secondary ? d_stream_F1.data() : nullptr,
+            is_secondary ? d_stream_primary_F.data() : nullptr,
             d_S_s.data(),
             d_sigma_c.data(),
             d_T_c.data(),
@@ -1578,12 +1617,17 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
     const double half_dt = 0.5 * grid.dt;
     int max_steps = static_cast<int>(std::ceil(tFinal / grid.dt - 1e-12));
     int idd_stride = std::max(1, phys.idd_stride);
+    const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
+    const size_t effective_lane_chunk = alignedLaneChunk(
+        static_cast<size_t>(std::max(1, phys.streaming_lane_chunk)),
+        n_angle);
 
     std::cout << "Starting BFPn solver..." << std::endl;
     std::cout << "Grid: " << grid.Nx << "x" << grid.Ny << "x" << grid.Nz
               << ", Energy: " << grid.Ng << ", Angle: " << grid.Nmu << "x" << grid.Nom << std::endl;
     std::cout << "Mode: streaming-full out-of-core"
-              << ", lane chunk " << std::max(1, phys.streaming_lane_chunk)
+              << ", lane chunk " << effective_lane_chunk
+              << " (requested " << std::max(1, phys.streaming_lane_chunk) << ")"
               << ", energy chunk " << std::max(1, phys.streaming_energy_chunk)
               << ", IDD stride " << idd_stride
               << std::endl;
