@@ -14,6 +14,8 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 // 网格参数结构体
 struct GridParams {
@@ -29,6 +31,21 @@ struct PhysicsParams {
     double sig_E;
     double a_1, a_2;
     double C_c;
+    double beam_energy;
+    double density;
+    double energy_density;
+    std::string material_name;
+    bool lite_memory;
+    bool streaming_full;
+    bool primary_only;
+    bool legacy_energy;
+    bool eq15_straggling;
+    int streaming_lane_chunk;
+    int streaming_energy_chunk;
+    std::string streaming_dir;
+    std::vector<double> spot_depths;
+    std::string spot_prefix;
+    int idd_stride;
 };
 
 // BFPn求解器主类
@@ -57,9 +74,8 @@ private:
     // 设备数据
     DeviceArray<double> d_F, d_f_F;       // 主质子
     DeviceArray<double> d_F1, d_f_F1;     // 二次质子
-    DeviceArray<double> d_F_tot, d_f_Ftot;
-    DeviceArray<double> d_source;          // 碰撞源项
     DeviceArray<double> d_reduction_sums;  // GPU归约临时缓冲
+    DeviceArray<double> d_spot_plane;      // YZ dose plane output buffer
     
     // 物理量数组
     DeviceArray<double> d_mu;              // 截面数据 [Ng][3]
@@ -74,7 +90,15 @@ private:
     
     // 内核数组
     DeviceArray<double> d_ker_e, d_ker_e1, d_ker_e2;  // 能量核
-    DeviceArray<double> d_ker_v;                      // 角度核 (密集，后续转稀疏)
+    DeviceArray<double> d_ker_v;                      // 角度核 [Ng][Nangle][Nangle]
+
+    // Out-of-core streaming state for full-grid development.
+    DeviceArray<double> d_stream_F, d_stream_f_F;
+    DeviceArray<double> d_stream_F1, d_stream_f_F1;
+    std::string stream_F_path, stream_f_F_path;
+    std::string stream_F1_path, stream_f_F1_path;
+    mutable std::unordered_map<std::string, int> stream_fds;
+    std::vector<double> h_stream_ker_e1, h_stream_ker_e2, h_stream_ker_v;
 
 public:
     BFPnSolver(const GridParams& g, const PhysicsParams& p);
@@ -92,10 +116,13 @@ public:
     void solve(double tFinal);
     
     // 保存结果
-    void saveResults(const std::vector<double>& dose, const std::string& filename);
+    void saveResults(const std::vector<double>& values, const std::string& filename);
+    void saveDepthResults(const std::vector<std::pair<double, double>>& values,
+                          const std::string& filename);
 
 private:
     void allocateMemory();
+    void preflightMemory() const;
     void freeMemory();
     void initializeKernels();
     void initializePhysicsQuantities();
@@ -103,8 +130,33 @@ private:
     // 单步求解
     void stepPrimary(int ping, double t);
     void stepSecondary(int ping, int pong, double t);
-    void computeCollisionSource(int ping);
-    double computeDose();
+    void stepLitePrimary();
+    void solveStreamingFull(double tFinal);
+    void initializeStreamingStore();
+    void cleanupStreamingStore();
+    void readStore(const std::string& path, size_t element_offset,
+                   double* dst, size_t count) const;
+    void writeStore(const std::string& path, size_t element_offset,
+                    const double* src, size_t count) const;
+    int getStoreFd(const std::string& path) const;
+    void streamingEnergyStep(const std::string& F_path,
+                             const std::string& f_F_path,
+                             const std::string* primary_F_path,
+                             const std::string* primary_f_F_path,
+                             bool is_secondary,
+                             double dt);
+    void streamingTransportStep(const std::string& F_path, double dt, bool preserve_sign = false);
+    void streamingAngleStep(const std::string& F_path, double dt);
+    double computeScalarDoseProxy();
+    double computeEnergyFlux(const double* F, const double* f_F);
+    double computeIntegratedDepthDose();
+    double computeIntegratedDepthDoseLite();
+    std::vector<double> computeSpotDosePlane();
+    void saveSpotPlane(double requested_depth, double actual_depth);
+    void saveSpotPlaneStreaming(double requested_depth, double actual_depth);
+    double computeEnergyFluxStreaming(const std::string& F_path,
+                                      const std::string& f_F_path);
+    double computeIntegratedDepthDoseStreaming();
     
     // 辅助函数
     void computeCrossSections();

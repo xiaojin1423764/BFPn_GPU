@@ -9,7 +9,10 @@ BFPn_CPU_Solver/serial_bfpn
 
 # Runtime outputs and plots
 dose_output.txt
+idd_output.txt
 dose_plot.png
+__pycache__/
+*.pyc
 
 # Profiling reports/databases
 *.ncu-rep

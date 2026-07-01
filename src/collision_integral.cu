@@ -41,6 +41,25 @@ __global__ void fillSparseValuesKernel(
     }
 }
 
+__global__ void buildLocalSecondarySourceKernel(
+    double* source,
+    const double* F_primary,
+    const double* f_F_primary,
+    const double* sigma_c,
+    int Ng,
+    int nyz,
+    int NmuNom
+) {
+    long long total = static_cast<long long>(Ng) * nyz * NmuNom;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    long long n_per_E = static_cast<long long>(nyz) * NmuNom;
+    int ek = static_cast<int>(gid / n_per_E);
+    double primary = F_primary[gid] + (f_F_primary ? f_F_primary[gid] : 0.0);
+    source[gid] = max(sigma_c[ek], 0.0) * max(primary, 0.0);
+}
+
 CollisionIntegral::CollisionIntegral(int nmu, int nom, int ng, cusparseHandle_t handle)
     : NmuNom(nmu * nom), Ng(ng), n_angle(nmu * nom), cusparse_handle(handle),
       cusparse_buffer_size(0) {
@@ -122,14 +141,22 @@ void CollisionIntegral::computeSource(
     double* source,
     const double* F_primary, const double* f_F_primary,
     const double* F_secondary, const double* f_F_secondary,
+    const double* sigma_c,
     int nyz,
     cudaStream_t stream) {
-    
-    // TODO: 实现基于碰撞积分的二次质子源项计算。
-    // 目前先作为占位实现，将源项清零，保证整体程序可以链接和运行。
-    CUDA_CHECK(cudaMemsetAsync(source, 0, 
-                               static_cast<size_t>(nyz) * NmuNom * Ng * sizeof(double), 
-                               stream));
+    long long total = static_cast<long long>(nyz) * NmuNom * Ng;
+    int block_size = 256;
+    int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+    buildLocalSecondarySourceKernel<<<grid_size, block_size, 0, stream>>>(
+        source,
+        F_primary,
+        f_F_primary,
+        sigma_c,
+        Ng,
+        nyz,
+        NmuNom
+    );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void CollisionIntegral::reorderForComputation(

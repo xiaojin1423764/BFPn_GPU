@@ -20,15 +20,41 @@ SpatialTransportSolver::~SpatialTransportSolver() {
     cufftDestroy(plan_inverse);
 }
 
-// 显式一阶迎风空间传输核
-__global__ void spatialTransportKernel(
+__device__ double muscl_paper_slope(double left, double center, double right) {
+    double forward = right - center;
+    if (fabs(forward) < Numerics::EPSILON) return 0.0;
+    double theta = (center - left) / forward;
+    double eta = max(0.0, max(min(2.0 * theta, 1.0), min(theta, 2.0)));
+    return forward * eta;
+}
+
+__device__ double load_clamped(
+    const double* F,
+    int ek,
+    int ang,
+    int i,
+    int j,
+    int Ny,
+    int Nz,
+    int NmuNom
+) {
+    int Ny1 = Ny + 1;
+    int Nz1 = Nz + 1;
+    i = max(0, min(i, Ny1 - 1));
+    j = max(0, min(j, Nz1 - 1));
+    long long nyz = static_cast<long long>(Ny1) * Nz1;
+    long long s = static_cast<long long>(j) * Ny1 + i;
+    long long idx = (static_cast<long long>(ek) * nyz + s) * NmuNom + ang;
+    return F[idx];
+}
+
+__global__ void spatialFluxDivergenceKernel(
     const double* F_in,
-    double* F_out,
+    double* flux_div,
     const double* Omend,
     int Ny, int Nz,
     int Ng, int NmuNom,
-    double dy, double dz,
-    double dt
+    double dy, double dz
 ) {
     int Ny1 = Ny + 1;
     int Nz1 = Nz + 1;
@@ -52,36 +78,75 @@ __global__ void spatialTransportKernel(
     double omega_y = Omend[2 * ang + 0];
     double omega_z = Omend[2 * ang + 1];
     
-    double F_center = F_in[base];
-    
-    // y 方向迎风差分
-    long long s_im1 = (i > 0)        ? (j * Ny1 + (i - 1)) : s;
-    long long s_ip1 = (i < Ny1 - 1)  ? (j * Ny1 + (i + 1)) : s;
-    long long idx_im1 = (static_cast<long long>(ek) * nyz + s_im1) * NmuNom + ang;
-    long long idx_ip1 = (static_cast<long long>(ek) * nyz + s_ip1) * NmuNom + ang;
-    
-    double dFdy = 0.0;
-    if (omega_y > 0.0) {
-        dFdy = (F_center - F_in[idx_im1]) / dy;
-    } else if (omega_y < 0.0) {
-        dFdy = (F_in[idx_ip1] - F_center) / dy;
+    double c = F_in[base];
+
+    double ym2 = load_clamped(F_in, ek, ang, i - 2, j, Ny, Nz, NmuNom);
+    double ym1 = load_clamped(F_in, ek, ang, i - 1, j, Ny, Nz, NmuNom);
+    double yp1 = load_clamped(F_in, ek, ang, i + 1, j, Ny, Nz, NmuNom);
+    double yp2 = load_clamped(F_in, ek, ang, i + 2, j, Ny, Nz, NmuNom);
+    double slope_y_m1 = muscl_paper_slope(ym2, ym1, c);
+    double slope_y_0 = muscl_paper_slope(ym1, c, yp1);
+    double slope_y_p1 = muscl_paper_slope(c, yp1, yp2);
+
+    double left_flux_y;
+    double right_flux_y;
+    if (omega_y >= 0.0) {
+        left_flux_y = omega_y * (ym1 + 0.5 * slope_y_m1);
+        right_flux_y = omega_y * (c + 0.5 * slope_y_0);
+    } else {
+        left_flux_y = omega_y * (c - 0.5 * slope_y_0);
+        right_flux_y = omega_y * (yp1 - 0.5 * slope_y_p1);
     }
-    
-    // z 方向迎风差分
-    long long s_jm1 = (j > 0)        ? ((j - 1) * Ny1 + i) : s;
-    long long s_jp1 = (j < Nz1 - 1)  ? ((j + 1) * Ny1 + i) : s;
-    long long idx_jm1 = (static_cast<long long>(ek) * nyz + s_jm1) * NmuNom + ang;
-    long long idx_jp1 = (static_cast<long long>(ek) * nyz + s_jp1) * NmuNom + ang;
-    
-    double dFdz = 0.0;
-    if (omega_z > 0.0) {
-        dFdz = (F_center - F_in[idx_jm1]) / dz;
-    } else if (omega_z < 0.0) {
-        dFdz = (F_in[idx_jp1] - F_center) / dz;
+
+    double zm2 = load_clamped(F_in, ek, ang, i, j - 2, Ny, Nz, NmuNom);
+    double zm1 = load_clamped(F_in, ek, ang, i, j - 1, Ny, Nz, NmuNom);
+    double zp1 = load_clamped(F_in, ek, ang, i, j + 1, Ny, Nz, NmuNom);
+    double zp2 = load_clamped(F_in, ek, ang, i, j + 2, Ny, Nz, NmuNom);
+    double slope_z_m1 = muscl_paper_slope(zm2, zm1, c);
+    double slope_z_0 = muscl_paper_slope(zm1, c, zp1);
+    double slope_z_p1 = muscl_paper_slope(c, zp1, zp2);
+
+    double left_flux_z;
+    double right_flux_z;
+    if (omega_z >= 0.0) {
+        left_flux_z = omega_z * (zm1 + 0.5 * slope_z_m1);
+        right_flux_z = omega_z * (c + 0.5 * slope_z_0);
+    } else {
+        left_flux_z = omega_z * (c - 0.5 * slope_z_0);
+        right_flux_z = omega_z * (zp1 - 0.5 * slope_z_p1);
     }
-    
-    double F_new = F_center - dt * (omega_y * dFdy + omega_z * dFdz);
-    F_out[base] = F_new;
+
+    flux_div[base] = (right_flux_y - left_flux_y) / dy +
+                     (right_flux_z - left_flux_z) / dz;
+}
+
+__global__ void spatialPredictorKernel(
+    const double* F,
+    const double* flux_div,
+    double* pred,
+    double dt,
+    bool preserve_sign,
+    long long total
+) {
+    long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    double value = F[idx] - dt * flux_div[idx];
+    pred[idx] = preserve_sign ? value : max(value, 0.0);
+}
+
+__global__ void spatialCorrectorKernel(
+    const double* F,
+    const double* flux_old,
+    const double* flux_pred,
+    double* out,
+    double dt,
+    bool preserve_sign,
+    long long total
+) {
+    long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    double value = F[idx] - 0.5 * dt * (flux_old[idx] + flux_pred[idx]);
+    out[idx] = preserve_sign ? value : max(value, 0.0);
 }
 
 void SpatialTransportSolver::initializeWaveNumbers() {
@@ -90,8 +155,6 @@ void SpatialTransportSolver::initializeWaveNumbers() {
     // 计算波数 (FFT shift后的顺序)
     for (int j = 0; j <= Nz; j++) {
         for (int i = 0; i <= Ny; i++) {
-            int idx = j * (Ny+1) + i;
-            
             double ky = 2.0 * Physics::PI / (Ny+1) * (i - (Ny+1)/2);
             double kz = 2.0 * Physics::PI / (Nz+1) * (j - (Nz+1)/2);
             
@@ -120,9 +183,10 @@ void SpatialTransportSolver::initializeTransportFactor(
 
 void SpatialTransportSolver::solve(double* F, const double* Omend,
                                     int Ng, int NmuNom, double dt,
-                                    cudaStream_t stream) {
-    // 显式一阶迎风格式的简化实现：不使用 FFT，而是在物理空间直接对
-    // y、z 方向做平流更新。为了避免读写冲突，使用临时数组存放 F_new。
+                                    cudaStream_t stream,
+                                    bool preserve_sign) {
+    // 显式MUSCL格式：在物理空间直接对 y、z 方向做平流更新。
+    // 为了避免读写冲突，使用临时数组存放 F_new。
     long long Ny1 = Ny + 1;
     long long Nz1 = Nz + 1;
     long long nyz_ll = Ny1 * Nz1;
@@ -130,19 +194,52 @@ void SpatialTransportSolver::solve(double* F, const double* Omend,
     
     if (d_F_tmp.getSize() < static_cast<size_t>(total)) {
         d_F_tmp.allocate(static_cast<size_t>(total));
+        d_F_pred.allocate(static_cast<size_t>(total));
+        d_flux_old.allocate(static_cast<size_t>(total));
+        d_flux_pred.allocate(static_cast<size_t>(total));
     }
     
     int block_size = 256;
     int grid_size  = static_cast<int>((total + block_size - 1) / block_size);
     
-    spatialTransportKernel<<<grid_size, block_size, 0, stream>>>(
-        F,                          // F_in
-        d_F_tmp.data(),             // F_out
+    spatialFluxDivergenceKernel<<<grid_size, block_size, 0, stream>>>(
+        F,
+        d_flux_old.data(),
         Omend,
         Ny, Nz,
         Ng, NmuNom,
-        dy, dz,
-        dt
+        dy, dz
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    spatialPredictorKernel<<<grid_size, block_size, 0, stream>>>(
+        F,
+        d_flux_old.data(),
+        d_F_pred.data(),
+        dt,
+        preserve_sign,
+        total
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    spatialFluxDivergenceKernel<<<grid_size, block_size, 0, stream>>>(
+        d_F_pred.data(),
+        d_flux_pred.data(),
+        Omend,
+        Ny, Nz,
+        Ng, NmuNom,
+        dy, dz
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    spatialCorrectorKernel<<<grid_size, block_size, 0, stream>>>(
+        F,
+        d_flux_old.data(),
+        d_flux_pred.data(),
+        d_F_tmp.data(),
+        dt,
+        preserve_sign,
+        total
     );
     CUDA_CHECK(cudaGetLastError());
     

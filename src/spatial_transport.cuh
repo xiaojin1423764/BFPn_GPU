@@ -22,6 +22,9 @@ private:
     DeviceArray<double> d_ky, d_kz;
     // 显式有限差分用的临时数组
     DeviceArray<double> d_F_tmp;
+    DeviceArray<double> d_F_pred;
+    DeviceArray<double> d_flux_old;
+    DeviceArray<double> d_flux_pred;
 
 public:
     SpatialTransportSolver(int ny, int nz, double dy, double dz);
@@ -34,7 +37,8 @@ public:
     // 执行空间传输
     void solve(double* F, const double* Omend,
                int Ng, int NmuNom, double dt, 
-               cudaStream_t stream = 0);
+               cudaStream_t stream = 0,
+               bool preserve_sign = false);
 };
 
 #endif

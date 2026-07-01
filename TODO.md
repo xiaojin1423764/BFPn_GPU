@@ -2,10 +2,12 @@
 
 ## Highest Priority
 
-- [ ] Replace per-slice angular FFT launches with batched cuFFT.
-  - Current code loops over `Ng * nyz` slices and launches multiple kernels/cuFFT calls per `11x11` slice.
-  - Use `cufftPlanMany` to process all angle slices in a batch.
-  - Expected impact: reduce millions of launches in small runs to a small number per solver step.
+- [ ] Optimize angular sine-series/DST implementation.
+  - Current strict Eq. `(21)` path uses direct global-memory sine transforms for
+    `Nmu,Nom <= 32`.
+  - Replace with a faster separable matrix-multiply implementation or a verified
+    batched odd-extension FFT/DST path before scaling to paper `20x20` grids.
+  - Keep the zero-boundary Eq. `(21)` semantics; do not return to periodic FFT.
 
 - [ ] Fix data dependency in `stepPrimary`.
   - Current code launches angular diffusion and spatial transport on `d_F` in different streams.
@@ -13,7 +15,7 @@
   - Use sequential execution or double-buffered input/output arrays.
 
 - [ ] Move dose reduction to GPU.
-  - Current `computeDose()` copies the full distribution back to host every step.
+  - Current IDD and scalar proxy reductions still copy block sums back to host every step.
   - Implement GPU reduction and copy back one scalar, or output depth-local dose arrays.
 
 ## Paper-Correct Output
@@ -23,18 +25,20 @@
   - Primary deposition follows paper equation `(24)`.
   - Add secondary proton deposition as a corresponding term.
 
-- [ ] Output `D(x,y,z)` or at least `IDD(x)`.
+- [x] Output at least `IDD(x)`.
   - `IDD(x) = integral integral D(x,y,z) dy dz`.
-  - Current `dose_output.txt` is only a scalar proxy and is not directly comparable with the paper.
+  - Current `idd_output.txt` is the Figure 3-facing output.
+  - Current `dose_output.txt` is retained only as a scalar diagnostic proxy.
 
-- [ ] Add output files for paper-style comparisons.
+- [ ] Add remaining output files for paper-style comparisons.
   - `idd_output.txt`: columns `x IDD`.
   - `spot_x_<depth>.txt` or binary output for `YZ` dose planes.
   - `longitudinal_output` for integrated longitudinal data.
 
-- [ ] Update plotting scripts to generate paper-relevant plots.
-  - IDD curve.
-  - Bragg peak, P90, D90, D20 markers.
+- [x] Add paper-relevant IDD analysis scripts.
+  - IDD curve plotting uses `scripts/plot_results.py`.
+  - Bragg peak, P90, D90, D20 metrics use `scripts/analyze_idd.py`.
+  - Table 2 batch runs use `scripts/run_table2.py`.
   - Spot distribution heatmaps.
   - Optional comparison against FLUKA/reference data.
 
@@ -44,48 +48,47 @@ The current solver is a prototype, not a paper-equivalent implementation. The ma
 not plotting or reduction performance; it is that the current energy step and dose output are not
 the model used in the paper.
 
-- [ ] Build the paper-style output path first.
+- [x] Build the first paper-style IDD output path.
   - Add depth-local buffers for primary and secondary energy deposition, e.g. `Edep_p(y,z)`,
     `Edep_s(y,z)`, and `D(y,z)`.
   - Output `idd_output.txt` with columns `x IDD`.
   - Optionally output `spot_x_<depth>.txt` for selected `YZ` dose planes.
   - Keep `dose_output.txt` only as a smoke-test scalar until it is removed or renamed.
 
-- [ ] Replace the scalar energy-group state with second-order DG energy coefficients.
-  - Current layout is effectively `F[Ng][nyz][NmuNom]`.
-  - Paper energy discretization uses two DG coefficients per group: `psi_g^1`, `psi_g^2`.
-  - Introduce a layout such as `F[2][Ng][nyz][NmuNom]` or `F[Ng][2][nyz][NmuNom]`.
+- [x] Replace the scalar energy-group state with second-order DG energy coefficients.
+  - The full path carries `F/f_F` and `F1/f_F1`, corresponding to
+    `psi_g^1/psi_g^2` for primary and secondary protons.
 
-- [ ] Implement the paper DG/CN energy subsystem before expecting a Bragg peak.
-  - Current `energyAttenuationKernel` uses `Fnew = Fold * exp(-sigma * dt)`.
+- [x] Complete the paper DG/CN energy subsystem before expecting a validated Bragg peak.
+  - Current energy update uses the Eq. `(15)` DG/CN path over `F` and `f_F`.
   - Paper equation `(15)` includes stopping power `S(E)`, straggling `T(E)`, catastrophic loss
     `sigma_c,t`, DG interface fluxes, and CN updates.
-  - Compute primary energy deposition from paper equation `(24)`, then add the corresponding
-    secondary term when secondary transport is implemented.
+  - Fine-grid water/bone 100/230 MeV IDD positions are within the requested
+    1-2% Table 2 target range.
 
-- [ ] Change `stepPrimary()` to the paper's second-order Strang depth splitting.
+- [x] Change `stepPrimary()` to the paper's second-order Strang depth splitting.
   - Target order: energy half step, spatial transport half step, angular diffusion full step,
     spatial transport half step, energy half step.
   - This corresponds to the paper's `L3/L4`, `L1`, `L2`, `L1`, `L3/L4` sequence.
   - Use the same structure for secondary protons once the source term is available.
 
-- [ ] Defer paper-level spatial transport until the energy/dose path is correct.
-  - Current transport is first-order upwind.
-  - Paper uses second-order MUSCL fluxes in `y,z`.
-  - Implement MUSCL after `idd_output.txt` is produced from the DG/CN energy path, so changes
-    can be validated one subsystem at a time.
+- [x] Add MUSCL-style spatial transport.
+  - Current transport uses the Eq. `(22)` limiter and a predictor-corrector CN
+    depth update.
+  - Still needs formal convergence tests against the paper diagnostics.
 
-- [ ] Treat the current FFT angular diffusion as an approximation until validated.
-  - Batched cuFFT is a performance fix, but the paper uses a specific CN discretization of
-    the Fokker-Planck angular operator.
+- [x] Replace periodic angular FFT semantics with zero-boundary sine-series semantics.
+  - Current angular diffusion uses the Eq. `(20)`-`(21)` CN eigenvalues and
+    DST-I/sine basis for `Nmu,Nom <= 32`.
   - Paper benchmark settings use `20x20` angular grid; current default is `11x11`.
-  - Verify angular boundary conditions and document whether FFT semantics match the paper.
+  - Next work is performance and convergence validation, not formula replacement.
 
-- [ ] Implement catastrophic-scattering secondary source.
-  - Current `computeSource()` clears the source to zero.
+- [x] Complete catastrophic-scattering secondary source in full and streaming modes.
+  - Full mode and streaming mode use the energy kernels `ker_e1/ker_e2` and
+    angular transition kernel `ker_v`.
   - Paper uses `sigma_c,s` built from `sigma_c,t * P(g' -> g) * P_angle((u',v') -> (u,v))`.
-  - Load or generate `sigma_c,s`, `sigma_c,t`, and transition matrices before reproducing
-    secondary-dose comparisons.
+  - Streaming mode is formula-aligned but slow because it evaluates the source
+    through host-backed chunks.
 
 - [ ] Validate in stages.
   - Stage 1: primary-only IDD with DG/CN energy and current transport/angular approximations.
@@ -95,14 +98,13 @@ the model used in the paper.
 
 ## Numerical Model Completeness
 
-- [ ] Replace simplified energy attenuation with paper-level energy discretization.
-  - Current `energyAttenuationKernel` uses `exp(-sigma * dt)`.
-  - Implement the DG/CN energy subsystem from the paper.
-  - Decide whether PCR, Thomas, cuSPARSE, or a custom batched tridiagonal solver is best.
+- [x] Replace simplified energy attenuation with paper-level energy discretization.
+  - Current `energyDgCnKernel` implements the Eq. `(15)` DG/CN subsystem.
+  - Further work is convergence testing and performance tuning.
 
-- [ ] Complete collision integral and source term.
-  - Current collision integral scaffolding is incomplete.
-  - Implement catastrophic scattering source for secondary protons.
+- [x] Complete collision integral and source term for Figure 3 IDD validation.
+  - Catastrophic scattering source for secondary protons is implemented with
+    energy and angle transition kernels.
   - Load or generate realistic `sigma_c,s`, `sigma_c,t`, and transition kernels.
 
 - [ ] Replace synthetic cross sections with paper/FLUKA-derived data.
@@ -110,15 +112,15 @@ the model used in the paper.
   - Add data format documentation and validation.
   - Support water, bone, air, and heterogeneous material maps.
 
-- [ ] Implement paper-level spatial transport.
-  - Current transport is simplified first-order upwind.
-  - Paper uses a second-order finite-volume/MUSCL-style discretization.
-  - Add limiter logic and verify against convergence tests.
+- [ ] Validate paper-level spatial transport.
+  - Current transport uses the Eq. `(22)` MUSCL limiter with a CN
+    predictor-corrector update.
+  - Verify against convergence tests and Figure 1/Figure 2 style diagnostics.
 
-- [ ] Revisit angular discretization.
-  - Current grid is `11x11`; paper tests use `20x20`.
-  - Check boundary conditions and whether sine-transform semantics are required.
-  - If keeping FFT, document the approximation clearly.
+- [ ] Validate angular discretization at larger grids.
+  - Current strict sine-series path is used for `Nmu,Nom <= 32`; paper tests use
+    `20x20`.
+  - Add convergence tests and optimize performance for larger angular grids.
 
 ## Validation
 
@@ -138,9 +140,9 @@ the model used in the paper.
   - Compare with paper Figure 1/Figure 2 style diagnostics.
 
 - [ ] Reproduce paper IDD benchmarks.
-  - Water, bone, air.
-  - Energies `50 MeV`, `100 MeV`, `230 MeV`.
-  - Compare BP, P90, D90, D20 against paper Table 2.
+  - Water and bone at `100 MeV` and `230 MeV` are within the requested 1-2%
+    Table 2 range on the strict fine grid.
+  - Remaining: water/bone `50 MeV`, air cases, and larger paper-grid convergence.
 
 ## Performance
 
@@ -158,11 +160,10 @@ the model used in the paper.
   - 10-step small profile.
   - full-grid profile.
 
-- [ ] Reduce launch overhead in angular diffusion.
-  - Batched real/complex conversion.
-  - Batched forward/inverse FFT.
-  - Batched frequency multiplication.
-  - Consider correct batched `D2Z/Z2D` half-spectrum implementation for performance.
+- [ ] Reduce overhead in angular diffusion.
+  - Optimize the direct sine-series kernels or replace them with a verified
+    batched odd-extension FFT/DST.
+  - Keep Eq. `(21)` zero-boundary semantics.
 
 - [ ] Optimize `spatialTransportKernel` after algorithmic fixes.
   - Reduce integer division/modulo if possible.
@@ -170,7 +171,7 @@ the model used in the paper.
   - Review FP64 usage and whether FP32/mixed precision is acceptable.
   - Use double buffering to avoid in-place hazards.
 
-- [ ] Optimize energy step after replacing the simplified model.
+- [ ] Optimize energy step.
   - Use batched tridiagonal solve.
   - Keep energy-major vs angle-major layout under review.
   - Avoid repeated host-device transfers.

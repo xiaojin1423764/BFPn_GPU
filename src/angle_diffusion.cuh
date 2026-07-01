@@ -13,8 +13,12 @@ private:
     int planned_batch;
     int planned_ng;
     int planned_nyz;
+    int extended_nmu;
+    int extended_nom;
+    int extended_angle;
     double cached_du;
     double cached_dv;
+    double cached_density;
     
     // FFT计划
     cufftHandle plan_forward;
@@ -23,6 +27,12 @@ private:
     // 设备缓冲区
     DeviceArray<cufftDoubleComplex> d_fft_buffer;
     DeviceArray<cufftDoubleComplex> d_diffusion_factor;
+    DeviceArray<cufftDoubleComplex> d_sine_buffer;
+    DeviceArray<double> d_F_tmp;
+    DeviceArray<double> d_sine_coeff;
+    DeviceArray<double> d_sine_u;
+    DeviceArray<double> d_sine_v;
+    DeviceArray<double> d_dst_coeff;
     
     // cuBLAS句柄
     cublasHandle_t cublas_handle;
@@ -32,11 +42,12 @@ public:
     ~AngleDiffusionSolver();
     
     // 初始化扩散系数 (包含sig_trg)
-    void initializeDiffusionFactor(const double* sig_trg, double du, double dv, double dt);
+    void initializeDiffusionFactor(const double* sig_trg, double du, double dv, double dt,
+                                   double density);
     
     // 执行角度扩散: 对每个空间点和能量层
     void solve(double* F, const double* sig_trg, 
-               int nyz, int Ng, double dt, cudaStream_t stream = 0);
+               int nyz, int Ng, double dt, double density, cudaStream_t stream = 0);
     
     // 批量处理版本
     void solveBatch(double* F, const double* sig_trg,

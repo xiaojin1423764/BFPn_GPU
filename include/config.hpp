@@ -14,6 +14,7 @@ namespace Physics {
     constexpr double HBARC = 197.3;         // MeV·fm
     constexpr double E_CHARGE = 1.6e-19;    // 元电荷 (C)
     constexpr double EV_TO_J = 1.6e-19;     // eV转焦耳
+    constexpr double MEV_TO_J = 1.6e-13;    // MeV转焦耳
 }
 
 // 默认网格配置

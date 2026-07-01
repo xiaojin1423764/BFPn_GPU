@@ -31,6 +31,12 @@ private:
     
     // 工作缓冲区
     DeviceArray<double> d_rhs_buffer;
+    DeviceArray<double> d_F_old;
+    DeviceArray<double> d_f_old;
+    DeviceArray<double> d_F_new;
+    DeviceArray<double> d_f_new;
+    DeviceArray<double> d_collision_F_temp;
+    DeviceArray<double> d_collision_f_temp;
     
     // cuBLAS句柄
     cublasHandle_t cublas_handle;
@@ -44,9 +50,24 @@ public:
         double* F, double* f_F,
         const double* F_half, const double* f_F_half,
         const double* S_s, const double* sigma_c, const double* T_c,
-        double dt, double dg,
+        double dt, double dg, double density,
         int nyz, int NmuNom,
         bool is_secondary, const double* source_term,
+        const double* source_term_f = nullptr,
+        bool use_legacy = false,
+        bool enable_straggling = false,
+        cudaStream_t stream = 0
+    );
+
+    void solveSecondaryFromPrimary(
+        double* F_secondary, double* f_secondary,
+        const double* F_primary, const double* f_primary,
+        const double* ker_e1, const double* ker_e2, const double* ker_v,
+        const double* S_s, const double* sigma_c, const double* T_c,
+        double dt, double dg, double density,
+        int nyz, int NmuNom,
+        bool use_legacy = false,
+        bool enable_straggling = false,
         cudaStream_t stream = 0
     );
     
@@ -55,9 +76,10 @@ public:
         double* F, double* f_F,
         const double* F_half, const double* f_F_half,
         const double* S_s, const double* sigma_c, const double* T_c,
-        double dt, double dg,
+        double dt, double dg, double density,
         int nyz, int NmuNom, int batch_start, int batch_size,
         bool is_secondary, const double* source_term,
+        const double* source_term_f = nullptr,
         cudaStream_t stream = 0
     );
 

@@ -53,6 +53,7 @@ public:
         double* source,
         const double* F_primary, const double* f_F_primary,
         const double* F_secondary, const double* f_F_secondary,
+        const double* sigma_c,
         int nyz,
         cudaStream_t stream = 0
     );
