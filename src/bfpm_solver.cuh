@@ -40,6 +40,11 @@ struct PhysicsParams {
     bool primary_only;
     bool legacy_energy;
     bool eq15_straggling;
+    bool save_energy_moments;
+    bool energy_only;
+    bool no_transport;
+    bool no_angle;
+    bool no_spatial_clipping;
     int streaming_lane_chunk;
     int streaming_energy_chunk;
     std::string streaming_dir;
@@ -75,6 +80,7 @@ private:
     DeviceArray<double> d_F, d_f_F;       // 主质子
     DeviceArray<double> d_F1, d_f_F1;     // 二次质子
     DeviceArray<double> d_reduction_sums;  // GPU归约临时缓冲
+    DeviceArray<double> d_energy_moments;   // [Ng][2] energy moment diagnostics
     DeviceArray<double> d_spot_plane;      // YZ dose plane output buffer
     
     // 物理量数组
@@ -119,6 +125,7 @@ public:
     void saveResults(const std::vector<double>& values, const std::string& filename);
     void saveDepthResults(const std::vector<std::pair<double, double>>& values,
                           const std::string& filename);
+    void saveEnergyMoments(const std::vector<double>& values, const std::string& filename);
 
 private:
     void allocateMemory();
@@ -129,6 +136,7 @@ private:
     
     // 单步求解
     void stepPrimary(int ping, double t);
+    void stepPrimaryEnergyOnly();
     void stepSecondary(int ping, int pong, double t);
     void stepLitePrimary();
     void solveStreamingFull(double tFinal);
@@ -151,6 +159,7 @@ private:
     double computeEnergyFlux(const double* F, const double* f_F);
     double computeIntegratedDepthDose();
     double computeIntegratedDepthDoseLite();
+    std::vector<double> computeEnergyMoments();
     std::vector<double> computeSpotDosePlane();
     void saveSpotPlane(double requested_depth, double actual_depth);
     void saveSpotPlaneStreaming(double requested_depth, double actual_depth);

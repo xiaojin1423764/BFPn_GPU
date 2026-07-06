@@ -65,6 +65,11 @@ int main(int argc, char** argv) {
     bool primary_only = false;
     bool legacy_energy = false;
     bool eq15_straggling = false;
+    bool save_energy_moments = false;
+    bool energy_only = false;
+    bool no_transport = false;
+    bool no_angle = false;
+    bool no_spatial_clipping = false;
     int streaming_lane_chunk = 262144;
     int streaming_energy_chunk = 16;
     int idd_stride = 1;
@@ -134,6 +139,16 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--eq15-straggling") {
             eq15_straggling = true;
+        } else if (arg == "--save-energy-moments") {
+            save_energy_moments = true;
+        } else if (arg == "--energy-only") {
+            energy_only = true;
+        } else if (arg == "--no-transport") {
+            no_transport = true;
+        } else if (arg == "--no-angle") {
+            no_angle = true;
+        } else if (arg == "--no-spatial-clipping") {
+            no_spatial_clipping = true;
         } else if (arg == "--sigma-yz" && i + 1 < argc) {
             sigma_yz = std::stod(argv[++i]);
         } else if (arg == "--lane-chunk" && i + 1 < argc) {
@@ -169,6 +184,11 @@ int main(int argc, char** argv) {
                       << "  --primary-only   Skip secondary proton evolution/source\n"
                       << "  --energy-model <eq15|legacy> Energy update model (default: eq15)\n"
                       << "  --eq15-straggling Enable Eq.15 straggling/SIPG terms during calibration\n"
+                      << "  --save-energy-moments Save paper Eq.25 energy-moment diagnostics\n"
+                      << "  --energy-only    Only advance the primary energy subsystem for convergence isolation\n"
+                      << "  --no-transport   Skip the spatial transport subsystem\n"
+                      << "  --no-angle       Skip the angular diffusion subsystem\n"
+                      << "  --no-spatial-clipping Disable positivity clipping in spatial transport\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
                       << "  --energy-chunk <n> Streaming transport/angle energy chunk (default: 16)\n"
@@ -233,6 +253,11 @@ int main(int argc, char** argv) {
     phys.primary_only = primary_only;
     phys.legacy_energy = legacy_energy;
     phys.eq15_straggling = eq15_straggling;
+    phys.save_energy_moments = save_energy_moments;
+    phys.energy_only = energy_only;
+    phys.no_transport = no_transport;
+    phys.no_angle = no_angle;
+    phys.no_spatial_clipping = no_spatial_clipping;
     phys.streaming_lane_chunk = streaming_lane_chunk;
     phys.streaming_energy_chunk = streaming_energy_chunk;
     phys.streaming_dir = streaming_dir;

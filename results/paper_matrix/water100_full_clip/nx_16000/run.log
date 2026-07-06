@@ -1,0 +1,50 @@
+Found 1 CUDA device(s)
+
+Device 0: NVIDIA GeForce RTX 5070 Ti
+  Compute Capability: 12.0
+  Total Memory: 16302 MB
+  Multiprocessors: 70
+  Max Threads/Block: 1024
+
+Memory estimate:
+  Mode: full
+  One phase-space double array: 0.00 GiB
+  Estimated current peak: 0.01 GiB plus safety margin 2.89 GiB
+  GPU memory free/total: 14.64 GiB / 15.92 GiB
+Discrete beam angle center: |omega_y|=0, |omega_z|=0
+Starting BFPn solver...
+Grid: 16000x6x6, Energy: 50, Angle: 5x5
+Step 100, t = 0.25/8, IDD = 0.00393607
+Step 200, t = 0.5/8, IDD = 0.00402673
+Step 300, t = 0.75/8, IDD = 0.00416097
+Step 400, t = 1/8, IDD = 0.00423473
+Step 500, t = 1.25/8, IDD = 0.00439806
+Step 600, t = 1.5/8, IDD = 0.00451171
+Step 700, t = 1.75/8, IDD = 0.00463898
+Step 800, t = 2/8, IDD = 0.00473743
+Step 900, t = 2.25/8, IDD = 0.00487161
+Step 1000, t = 2.5/8, IDD = 0.0049886
+Step 1100, t = 2.75/8, IDD = 0.00512525
+Step 1200, t = 3/8, IDD = 0.00524989
+Step 1300, t = 3.25/8, IDD = 0.00540705
+Step 1400, t = 3.5/8, IDD = 0.00554922
+Step 1500, t = 3.75/8, IDD = 0.00572433
+Step 1600, t = 4/8, IDD = 0.00591435
+Step 1700, t = 4.25/8, IDD = 0.00610745
+Step 1800, t = 4.5/8, IDD = 0.00633119
+Step 1900, t = 4.75/8, IDD = 0.00659329
+Step 2000, t = 5/8, IDD = 0.00692001
+Step 2100, t = 5.25/8, IDD = 0.00728101
+Step 2200, t = 5.5/8, IDD = 0.00760685
+Step 2300, t = 5.75/8, IDD = 0.00796186
+Step 2400, t = 6/8, IDD = 0.00852057
+Step 2500, t = 6.25/8, IDD = 0.00952959
+Step 2600, t = 6.5/8, IDD = 0.0110083
+Step 2700, t = 6.75/8, IDD = 0.0123524
+Step 2800, t = 7/8, IDD = 0.0128641
+Step 2900, t = 7.25/8, IDD = 0.0121489
+Step 3000, t = 7.5/8, IDD = 0.0102917
+Step 3100, t = 7.75/8, IDD = 0.00776938
+Step 3200, t = 8/8, IDD = 0.00518259
+Solver completed. Paper-style IDD saved to idd_output.txt
+Diagnostic scalar proxy saved to dose_output.txt

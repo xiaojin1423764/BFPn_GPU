@@ -186,6 +186,57 @@ __global__ void integratedDepthDoseKernel(
     }
 }
 
+__global__ void energyMomentKernel(
+    const double* F,
+    const double* f_F,
+    const double* F1,
+    const double* f_F1,
+    double* moments,
+    int Ng,
+    int nyz,
+    int NmuNom,
+    double du,
+    double dv,
+    double dy,
+    double dz
+) {
+    int ek = blockIdx.x;
+    int tid = threadIdx.x;
+    if (ek >= Ng) return;
+
+    extern __shared__ double shared[];
+    double* shared_psi1 = shared;
+    double* shared_psi2 = shared + blockDim.x;
+
+    const long long n_per_E = static_cast<long long>(nyz) * NmuNom;
+    const long long base = static_cast<long long>(ek) * n_per_E;
+    double sum1 = 0.0;
+    double sum2 = 0.0;
+    for (long long lane = tid; lane < n_per_E; lane += blockDim.x) {
+        long long idx = base + lane;
+        sum1 += F[idx] + F1[idx];
+        sum2 += f_F[idx] + f_F1[idx];
+    }
+
+    shared_psi1[tid] = sum1;
+    shared_psi2[tid] = sum2;
+    __syncthreads();
+
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            shared_psi1[tid] += shared_psi1[tid + offset];
+            shared_psi2[tid] += shared_psi2[tid + offset];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        double weight = du * dv * dy * dz;
+        moments[2 * ek + 0] = shared_psi1[0] * weight;
+        moments[2 * ek + 1] = shared_psi2[0] * weight;
+    }
+}
+
 __global__ void spotDosePlaneKernel(
     const double* F,
     const double* f_F,
@@ -679,6 +730,7 @@ void BFPnSolver::allocateMemory() {
         d_stream_f_F1.allocate(stream_size);
         d_stream_primary_F.allocate(stream_size);
         d_stream_primary_f_F.allocate(stream_size);
+        d_energy_moments.allocate(static_cast<size_t>(grid.Ng) * 2);
 
         constexpr int reduction_block_size = 256;
         size_t reduction_blocks = (stream_size + reduction_block_size * 2 - 1) /
@@ -716,6 +768,7 @@ void BFPnSolver::allocateMemory() {
     size_t reduction_blocks = (total_size + reduction_block_size * 2 - 1) /
                               (reduction_block_size * 2);
     d_reduction_sums.allocate(reduction_blocks);
+    d_energy_moments.allocate(static_cast<size_t>(grid.Ng) * 2);
 
     // 网格数据
     d_y.allocate(grid.Ny + 1);
@@ -1370,6 +1423,7 @@ void BFPnSolver::solve(double tFinal) {
 
     std::vector<double> idd_history;
     std::vector<double> proxy_history;
+    std::vector<double> energy_moment_history;
     std::vector<char> spot_saved(phys.spot_depths.size(), 0);
     double t = 0.0;
     int step = 0;
@@ -1401,11 +1455,14 @@ void BFPnSolver::solve(double tFinal) {
             continue;
         }
 
-        // Primary质子: 角度扩散 -> 空间传输 -> 能量沉积
-        stepPrimary(ping, t);
+        if (phys.energy_only) {
+            stepPrimaryEnergyOnly();
+        } else {
+            stepPrimary(ping, t);
+        }
 
         // Secondary质子: 演化 (包含源项)
-        if (!phys.primary_only && step > 0) {
+        if (!phys.energy_only && !phys.primary_only && step > 0) {
             stepSecondary(ping, pong, t);
             std::swap(ping, pong);
         }
@@ -1414,6 +1471,12 @@ void BFPnSolver::solve(double tFinal) {
         double proxy = computeScalarDoseProxy();
         idd_history.push_back(idd);
         proxy_history.push_back(proxy);
+        if (phys.save_energy_moments) {
+            std::vector<double> moments = computeEnergyMoments();
+            energy_moment_history.insert(energy_moment_history.end(),
+                                         moments.begin(),
+                                         moments.end());
+        }
 
         t += grid.dt;
         step++;
@@ -1433,6 +1496,9 @@ void BFPnSolver::solve(double tFinal) {
 
     saveResults(idd_history, "idd_output.txt");
     saveResults(proxy_history, "dose_output.txt");
+    if (phys.save_energy_moments) {
+        saveEnergyMoments(energy_moment_history, "energy_moments.txt");
+    }
     std::cout << "Solver completed. Paper-style IDD saved to idd_output.txt" << std::endl;
     std::cout << "Diagnostic scalar proxy saved to dose_output.txt" << std::endl;
 }
@@ -1700,32 +1766,38 @@ void BFPnSolver::stepPrimary(int ping, double t) {
                         phys.legacy_energy, phys.eq15_straggling, stream_primary[0]);
     CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
 
-    transport_solver->solve(d_F.data(), d_Omend.data(),
-                           grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                           stream_primary[0]);
-    CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
-    transport_solver->solve(d_f_F.data(), d_Omend.data(),
-                           grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                           stream_primary[0], true);
-    CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    if (!phys.no_transport) {
+        transport_solver->solve(d_F.data(), d_Omend.data(),
+                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                               stream_primary[0], phys.no_spatial_clipping);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        transport_solver->solve(d_f_F.data(), d_Omend.data(),
+                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                               stream_primary[0], true);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    }
 
-    angle_solver->solve(d_F.data(), d_sig_trg.data(),
-                       (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
-                       phys.density, stream_primary[0]);
-    CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
-    angle_solver->solve(d_f_F.data(), d_sig_trg.data(),
-                       (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
-                       phys.density, stream_primary[0]);
-    CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    if (!phys.no_angle) {
+        angle_solver->solve(d_F.data(), d_sig_trg.data(),
+                           (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
+                           phys.density, stream_primary[0]);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        angle_solver->solve(d_f_F.data(), d_sig_trg.data(),
+                           (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
+                           phys.density, stream_primary[0]);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    }
 
-    transport_solver->solve(d_F.data(), d_Omend.data(),
-                           grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                           stream_primary[0]);
-    CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
-    transport_solver->solve(d_f_F.data(), d_Omend.data(),
-                           grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                           stream_primary[0], true);
-    CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    if (!phys.no_transport) {
+        transport_solver->solve(d_F.data(), d_Omend.data(),
+                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                               stream_primary[0], phys.no_spatial_clipping);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        transport_solver->solve(d_f_F.data(), d_Omend.data(),
+                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                               stream_primary[0], true);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    }
 
     energy_solver->solve(d_F.data(), d_f_F.data(),
                         d_F.data(), d_f_F.data(),
@@ -1735,6 +1807,21 @@ void BFPnSolver::stepPrimary(int ping, double t) {
                         false, nullptr, nullptr,
                         phys.legacy_energy, phys.eq15_straggling, stream_primary[0]);
     CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+}
+
+void BFPnSolver::stepPrimaryEnergyOnly() {
+    const double half_dt = 0.5 * grid.dt;
+    for (int pass = 0; pass < 2; ++pass) {
+        energy_solver->solve(d_F.data(), d_f_F.data(),
+                            d_F.data(), d_f_F.data(),
+                            d_S_s.data(), d_sigma_c.data(), d_T_c.data(),
+                            half_dt, grid.dg, phys.energy_density,
+                            (grid.Ny+1)*(grid.Nz+1), grid.Nmu*grid.Nom,
+                            false, nullptr, nullptr,
+                            phys.legacy_energy, phys.eq15_straggling,
+                            stream_primary[0]);
+        CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    }
 }
 
 void BFPnSolver::stepSecondary(int ping, int pong, double t) {
@@ -1906,6 +1993,30 @@ double BFPnSolver::computeIntegratedDepthDose() {
         idd += partial;
     }
     return idd;
+}
+
+std::vector<double> BFPnSolver::computeEnergyMoments() {
+    int nyz = (grid.Ny + 1) * (grid.Nz + 1);
+    int n_angle = grid.Nmu * grid.Nom;
+    if (d_energy_moments.getSize() < static_cast<size_t>(grid.Ng) * 2) {
+        d_energy_moments.allocate(static_cast<size_t>(grid.Ng) * 2);
+    }
+
+    constexpr int block_size = 256;
+    energyMomentKernel<<<grid.Ng,
+                         block_size,
+                         2 * block_size * sizeof(double)>>>(
+        d_F.data(), d_f_F.data(),
+        d_F1.data(), d_f_F1.data(),
+        d_energy_moments.data(),
+        grid.Ng, nyz, n_angle,
+        grid.du, grid.dv, grid.dy, grid.dz
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    std::vector<double> moments(static_cast<size_t>(grid.Ng) * 2);
+    d_energy_moments.copyToHost(moments.data(), moments.size());
+    return moments;
 }
 
 double BFPnSolver::computeIntegratedDepthDoseLite() {
@@ -2196,6 +2307,26 @@ void BFPnSolver::saveResults(const std::vector<double>& values, const std::strin
     out << "# x_cm value\n";
     for (size_t i = 0; i < values.size(); i++) {
         out << (i + 1) * grid.dt << " " << values[i] << "\n";
+    }
+}
+
+void BFPnSolver::saveEnergyMoments(const std::vector<double>& values,
+                                   const std::string& filename) {
+    std::ofstream out(filename);
+    out << "# step x_cm g psi1_integral psi2_integral\n";
+    const size_t per_step = static_cast<size_t>(grid.Ng) * 2;
+    if (per_step == 0) return;
+    const size_t steps = values.size() / per_step;
+    for (size_t step = 0; step < steps; ++step) {
+        double x = (step + 1) * grid.dt;
+        size_t base = step * per_step;
+        for (int g = 0; g < grid.Ng; ++g) {
+            out << (step + 1) << " "
+                << x << " "
+                << g << " "
+                << values[base + static_cast<size_t>(2 * g)] << " "
+                << values[base + static_cast<size_t>(2 * g + 1)] << "\n";
+        }
     }
 }
 

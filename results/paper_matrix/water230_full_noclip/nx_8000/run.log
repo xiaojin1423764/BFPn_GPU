@@ -1,0 +1,88 @@
+Found 1 CUDA device(s)
+
+Device 0: NVIDIA GeForce RTX 5070 Ti
+  Compute Capability: 12.0
+  Total Memory: 16302 MB
+  Multiprocessors: 70
+  Max Threads/Block: 1024
+
+Memory estimate:
+  Mode: full
+  One phase-space double array: 0.00 GiB
+  Estimated current peak: 0.01 GiB plus safety margin 2.89 GiB
+  GPU memory free/total: 14.64 GiB / 15.92 GiB
+Discrete beam angle center: |omega_y|=0, |omega_z|=0
+Starting BFPn solver...
+Grid: 8000x6x6, Energy: 50, Angle: 5x5
+Step 100, t = 0.5/35, IDD = 0.00478395
+Step 200, t = 1/35, IDD = 0.00476166
+Step 300, t = 1.5/35, IDD = 0.00473976
+Step 400, t = 2/35, IDD = 0.00471802
+Step 500, t = 2.5/35, IDD = 0.00469613
+Step 600, t = 3/35, IDD = 0.00467385
+Step 700, t = 3.5/35, IDD = 0.00465109
+Step 800, t = 4/35, IDD = 0.00462794
+Step 900, t = 4.5/35, IDD = 0.00460444
+Step 1000, t = 5/35, IDD = 0.00458067
+Step 1100, t = 5.5/35, IDD = 0.00455698
+Step 1200, t = 6/35, IDD = 0.0045337
+Step 1300, t = 6.5/35, IDD = 0.0045106
+Step 1400, t = 7/35, IDD = 0.00448683
+Step 1500, t = 7.5/35, IDD = 0.00446176
+Step 1600, t = 8/35, IDD = 0.00443613
+Step 1700, t = 8.5/35, IDD = 0.00441244
+Step 1800, t = 9/35, IDD = 0.00439435
+Step 1900, t = 9.5/35, IDD = 0.00438522
+Step 2000, t = 10/35, IDD = 0.00438691
+Step 2100, t = 10.5/35, IDD = 0.00439934
+Step 2200, t = 11/35, IDD = 0.00442085
+Step 2300, t = 11.5/35, IDD = 0.00444901
+Step 2400, t = 12/35, IDD = 0.00448148
+Step 2500, t = 12.5/35, IDD = 0.00451648
+Step 2600, t = 13/35, IDD = 0.00455299
+Step 2700, t = 13.5/35, IDD = 0.00459058
+Step 2800, t = 14/35, IDD = 0.00462923
+Step 2900, t = 14.5/35, IDD = 0.00466912
+Step 3000, t = 15/35, IDD = 0.00471046
+Step 3100, t = 15.5/35, IDD = 0.00475348
+Step 3200, t = 16/35, IDD = 0.00479836
+Step 3300, t = 16.5/35, IDD = 0.00484527
+Step 3400, t = 17/35, IDD = 0.00489436
+Step 3500, t = 17.5/35, IDD = 0.00494581
+Step 3600, t = 18/35, IDD = 0.00499983
+Step 3700, t = 18.5/35, IDD = 0.00505662
+Step 3800, t = 19/35, IDD = 0.00511639
+Step 3900, t = 19.5/35, IDD = 0.00517943
+Step 4000, t = 20/35, IDD = 0.00524625
+Step 4100, t = 20.5/35, IDD = 0.00531721
+Step 4200, t = 21/35, IDD = 0.00539218
+Step 4300, t = 21.5/35, IDD = 0.00547125
+Step 4400, t = 22/35, IDD = 0.0055561
+Step 4500, t = 22.5/35, IDD = 0.00564966
+Step 4600, t = 23/35, IDD = 0.0057522
+Step 4700, t = 23.5/35, IDD = 0.00585838
+Step 4800, t = 24/35, IDD = 0.00596252
+Step 4900, t = 24.5/35, IDD = 0.0060714
+Step 5000, t = 25/35, IDD = 0.00620959
+Step 5100, t = 25.5/35, IDD = 0.00640131
+Step 5200, t = 26/35, IDD = 0.00663569
+Step 5300, t = 26.5/35, IDD = 0.00684997
+Step 5400, t = 27/35, IDD = 0.00696499
+Step 5500, t = 27.5/35, IDD = 0.00696672
+Step 5600, t = 28/35, IDD = 0.00697613
+Step 5700, t = 28.5/35, IDD = 0.00723707
+Step 5800, t = 29/35, IDD = 0.00799927
+Step 5900, t = 29.5/35, IDD = 0.00935164
+Step 6000, t = 30/35, IDD = 0.0111069
+Step 6100, t = 30.5/35, IDD = 0.0128192
+Step 6200, t = 31/35, IDD = 0.0139393
+Step 6300, t = 31.5/35, IDD = 0.0140311
+Step 6400, t = 32/35, IDD = 0.0129413
+Step 6500, t = 32.5/35, IDD = 0.0108472
+Step 6600, t = 33/35, IDD = 0.00817257
+Step 6700, t = 33.5/35, IDD = 0.00542663
+Step 6800, t = 34/35, IDD = 0.0030408
+Step 6900, t = 34.5/35, IDD = 0.00126753
+Step 7000, t = 35/35, IDD = 0.00016104
+Solver completed. Paper-style IDD saved to idd_output.txt
+Diagnostic scalar proxy saved to dose_output.txt

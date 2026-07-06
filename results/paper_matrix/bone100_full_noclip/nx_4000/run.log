@@ -1,0 +1,23 @@
+Found 1 CUDA device(s)
+
+Device 0: NVIDIA GeForce RTX 5070 Ti
+  Compute Capability: 12.0
+  Total Memory: 16302 MB
+  Multiprocessors: 70
+  Max Threads/Block: 1024
+
+Memory estimate:
+  Mode: full
+  One phase-space double array: 0.00 GiB
+  Estimated current peak: 0.01 GiB plus safety margin 2.89 GiB
+  GPU memory free/total: 14.64 GiB / 15.92 GiB
+Discrete beam angle center: |omega_y|=0, |omega_z|=0
+Starting BFPn solver...
+Grid: 4000x6x6, Energy: 50, Angle: 5x5
+Step 100, t = 1/5, IDD = 0.00207262
+Step 200, t = 2/5, IDD = 0.00235436
+Step 300, t = 3/5, IDD = 0.00283644
+Step 400, t = 4/5, IDD = 0.00426817
+Step 500, t = 5/5, IDD = 0.00349776
+Solver completed. Paper-style IDD saved to idd_output.txt
+Diagnostic scalar proxy saved to dose_output.txt
