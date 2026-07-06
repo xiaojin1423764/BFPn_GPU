@@ -53,6 +53,25 @@ struct PhysicsParams {
     int idd_stride;
 };
 
+class HostDoubleBuffer {
+private:
+    double* ptr;
+    size_t capacity;
+    bool pinned;
+    std::vector<double> pageable;
+
+    void releasePinned();
+
+public:
+    HostDoubleBuffer();
+    ~HostDoubleBuffer();
+    HostDoubleBuffer(const HostDoubleBuffer&) = delete;
+    HostDoubleBuffer& operator=(const HostDoubleBuffer&) = delete;
+
+    void resize(size_t count);
+    double* data();
+};
+
 // BFPn求解器主类
 class BFPnSolver {
 private:
@@ -102,9 +121,15 @@ private:
     DeviceArray<double> d_stream_F, d_stream_f_F;
     DeviceArray<double> d_stream_F1, d_stream_f_F1;
     DeviceArray<double> d_stream_primary_F, d_stream_primary_f_F;
+    DeviceArray<double> d_stream_old_F, d_stream_old_f_F;
     std::string stream_F_path, stream_f_F_path;
     std::string stream_F1_path, stream_f_F1_path;
     mutable std::unordered_map<std::string, int> stream_fds;
+    HostDoubleBuffer h_stream_lane;
+    HostDoubleBuffer h_stream_f_lane;
+    HostDoubleBuffer h_stream_primary_lane;
+    HostDoubleBuffer h_stream_primary_f_lane;
+    HostDoubleBuffer h_stream_chunk;
 
 public:
     BFPnSolver(const GridParams& g, const PhysicsParams& p);
@@ -152,7 +177,8 @@ private:
                              const std::string* primary_F_path,
                              const std::string* primary_f_F_path,
                              bool is_secondary,
-                             double dt);
+                             double dt,
+                             double* idd_accum = nullptr);
     void streamingTransportStep(const std::string& F_path, double dt, bool preserve_sign = false);
     void streamingAngleStep(const std::string& F_path, double dt);
     double computeScalarDoseProxy();

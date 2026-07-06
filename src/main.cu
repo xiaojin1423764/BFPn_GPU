@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
     bool no_angle = false;
     bool no_spatial_clipping = false;
     int streaming_lane_chunk = 262144;
-    int streaming_energy_chunk = 16;
+    int streaming_energy_chunk = 128;
     int idd_stride = 1;
     std::string streaming_dir = "/tmp";
     std::vector<double> spot_depths;
@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
                       << "  --no-spatial-clipping Disable positivity clipping in spatial transport\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
-                      << "  --energy-chunk <n> Streaming transport/angle energy chunk (default: 16)\n"
+                      << "  --energy-chunk <n> Streaming transport/angle energy chunk (default: 128)\n"
                       << "  --stream-dir <path> Streaming backing file directory (default: /tmp)\n"
                       << "  --idd-stride <n> Compute/save IDD every n steps in streaming mode (default: 1)\n"
                       << "  --spot-depths <x,...> Save YZ dose planes near requested depths\n"

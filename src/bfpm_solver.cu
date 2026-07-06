@@ -237,6 +237,52 @@ __global__ void energyMomentKernel(
     }
 }
 
+__global__ void pairDepthDoseLaneKernel(
+    const double* F,
+    const double* f_F,
+    const double* S_s,
+    double* block_sums,
+    int Ng,
+    int lanes,
+    double dg,
+    double density,
+    double quadrature_weight,
+    size_t total
+) {
+    extern __shared__ double shared[];
+    unsigned int tid = threadIdx.x;
+    size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x * 2 + threadIdx.x;
+    size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x * 2;
+
+    double sum = 0.0;
+    while (idx < total) {
+        for (int pass = 0; pass < 2; ++pass) {
+            size_t cur = idx + static_cast<size_t>(pass) * blockDim.x;
+            if (cur >= total) continue;
+
+            int ek = static_cast<int>(cur / lanes);
+            double S_mid = 0.5 * (S_s[ek] + S_s[ek + 1]);
+            double slope_weight = (S_s[ek + 1] - S_s[ek]) / 6.0;
+            sum += (F[cur] * S_mid * dg + f_F[cur] * slope_weight * dg) / density;
+        }
+        idx += stride;
+    }
+
+    shared[tid] = sum;
+    __syncthreads();
+
+    for (unsigned int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            shared[tid] += shared[tid + offset];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        block_sums[blockIdx.x] = shared[0] * quadrature_weight;
+    }
+}
+
 __global__ void spotDosePlaneKernel(
     const double* F,
     const double* f_F,
@@ -397,8 +443,10 @@ __global__ void litePrimaryEnergyStepKernel(
 }
 
 __global__ void streamingEnergyDgCnKernel(
-    double* F,
-    double* f_F,
+    const double* F_old,
+    const double* f_old,
+    double* F_new,
+    double* f_new,
     const double* source_term,
     const double* S_s,
     const double* sigma_c,
@@ -425,14 +473,14 @@ __global__ void streamingEnergyDgCnKernel(
 
     for (int ek = Ng - 1; ek >= 0; --ek) {
         long long idx = static_cast<long long>(ek) * lanes + lane;
-        double Fg = F[idx];
-        double fg = f_F ? f_F[idx] : 0.0;
+        double Fg = F_old[idx];
+        double fg = f_old ? f_old[idx] : 0.0;
         double sig = max(sigma_c[ek], 0.0);
         double S_lo = max(S_s[ek], 0.0);
         double S_hi = max(S_s[ek + 1], 0.0);
         double T_g = (enable_straggling && T_c) ? max(T_c[ek], 0.0) : 0.0;
-        double T_hi = (enable_straggling && T_c && ek + 1 < Ng) ? max(T_c[ek + 1], 0.0) : T_g;
-        double T_lo = (enable_straggling && T_c && ek > 0) ? max(T_c[ek - 1], 0.0) : T_g;
+        double T_hi = (enable_straggling && T_c && ek + 1 < Ng) ? max(T_c[ek + 1], 0.0) : 0.0;
+        double T_lo = (enable_straggling && T_c && ek > 0) ? max(T_c[ek - 1], 0.0) : 0.0;
         double source = (is_secondary && source_term) ? source_term[idx] : 0.0;
 
         if (use_legacy) {
@@ -443,20 +491,21 @@ __global__ void streamingEnergyDgCnKernel(
             double f_val = (fg / dt + density * S_hi / dg * next_f)
                          / max(denom_f, Numerics::EPSILON);
             if (T_g > 0.0) {
-                double Fhi = load(F, ek + 1);
-                double Flo = load(F, ek - 1);
+                double Fhi = load(F_old, ek + 1);
+                double Flo = load(F_old, ek - 1);
                 double lap = max(Fhi, 0.0) - 2.0 * max(Fg, 0.0) + max(Flo, 0.0);
                 F_val += 0.5 * dt * T_g / dg2 * lap;
             }
-            F[idx] = max(F_val, 0.0);
-            f_F[idx] = max(f_val, 0.0);
-            next_F = F[idx];
-            next_f = f_F[idx];
+            F_new[idx] = max(F_val, 0.0);
+            f_new[idx] = max(f_val, 0.0);
+            next_F = F_new[idx];
+            next_f = f_new[idx];
             continue;
         }
 
-        const double p1_hi = load(F, ek + 1);
-        const double p2_hi = load(f_F, ek + 1);
+        const double p1_hi = load(F_old, ek + 1);
+        const double p2_hi = load(f_old, ek + 1);
+        const double p1_lo = load(F_old, ek - 1);
         const double up = p1_hi - p2_hi;
         const double cur = Fg - fg;
 
@@ -466,22 +515,23 @@ __global__ void streamingEnergyDgCnKernel(
         const double A = (1.5 * density * S_hi / dg) * inv_F;
         const double F_from_f = (0.5 * density * S_lo / dg) * inv_F;
         const double F_from_hi = (0.5 * density * S_hi / dg) * inv_F;
-        const double rhs4 = inv_F * (0.5 * density * S_hi / dg * up
-                                    -0.5 * density * S_lo / dg * cur
-                                    -0.5 * sig * Fg
-                                    + Fg / dt
-                                    + source);
+        const double strag_rhs = 0.5 * density * T_hi / dg2 * p1_hi
+                               + 0.5 * density * T_lo / dg2 * p1_lo
+                               - density * T_g / dg2 * Fg;
+        const double common_rhs = 0.5 * density * S_hi / dg * up
+                                - 0.5 * density * S_lo / dg * cur
+                                - 0.5 * sig * Fg
+                                + Fg / dt
+                                + strag_rhs
+                                + source;
+        const double rhs4 = inv_F * common_rhs;
 
         const double rhs1e = fg / dt - 0.5 * sig * fg;
         const double rhs2e = 1.5 * density * S_hi / dg * up
                            + 1.5 * density * S_lo / dg * cur
                            - 1.5 * density * (S_lo + S_hi) / dg * Fg
                            - 0.5 * density * (S_hi - S_lo) / dg * fg;
-        const double rhs3e = A * (0.5 * density * S_hi / dg * up
-                                 -0.5 * density * S_lo / dg * cur
-                                 -0.5 * sig * Fg
-                                 + Fg / dt
-                                 + source);
+        const double rhs3e = A * common_rhs;
 
         const double high2 = 1.5 * density * S_hi / dg;
         const double hi_delta = next_F - next_f;
@@ -495,10 +545,10 @@ __global__ void streamingEnergyDgCnKernel(
         double f_val = rhs / max(coe, Numerics::EPSILON);
         double F_val = F_from_f * f_val + rhs4 + F_from_hi * hi_delta;
 
-        F[idx] = F_val;
-        f_F[idx] = f_val;
-        next_F = F[idx];
-        next_f = f_F[idx];
+        F_new[idx] = F_val;
+        f_new[idx] = f_val;
+        next_F = F_val;
+        next_f = f_val;
     }
 }
 
@@ -656,6 +706,49 @@ void GridParams::computeDeltas() {
     dv = Lv / (Nmu + 1);
 }
 
+HostDoubleBuffer::HostDoubleBuffer()
+    : ptr(nullptr), capacity(0), pinned(false) {}
+
+HostDoubleBuffer::~HostDoubleBuffer() {
+    releasePinned();
+}
+
+void HostDoubleBuffer::releasePinned() {
+    if (pinned && ptr) {
+        cudaFreeHost(ptr);
+    }
+    ptr = nullptr;
+    capacity = 0;
+    pinned = false;
+}
+
+void HostDoubleBuffer::resize(size_t count) {
+    if (count <= capacity) {
+        return;
+    }
+    releasePinned();
+    pageable.clear();
+
+    void* raw = nullptr;
+    cudaError_t err = cudaMallocHost(&raw, count * sizeof(double));
+    if (err == cudaSuccess) {
+        ptr = static_cast<double*>(raw);
+        capacity = count;
+        pinned = true;
+        return;
+    }
+
+    cudaGetLastError();
+    pageable.resize(count);
+    ptr = pageable.data();
+    capacity = count;
+    pinned = false;
+}
+
+double* HostDoubleBuffer::data() {
+    return ptr;
+}
+
 BFPnSolver::BFPnSolver(const GridParams& g, const PhysicsParams& p)
     : grid(g), phys(p) {
 
@@ -730,6 +823,8 @@ void BFPnSolver::allocateMemory() {
         d_stream_f_F1.allocate(stream_size);
         d_stream_primary_F.allocate(stream_size);
         d_stream_primary_f_F.allocate(stream_size);
+        d_stream_old_F.allocate(stream_size);
+        d_stream_old_f_F.allocate(stream_size);
         d_energy_moments.allocate(static_cast<size_t>(grid.Ng) * 2);
 
         constexpr int reduction_block_size = 256;
@@ -836,7 +931,7 @@ void BFPnSolver::preflightMemory() const {
         const size_t max_chunk_cells = std::max(energy_chunk_cells, lane_chunk_cells);
         const size_t stream_array = checkedMul(max_chunk_cells, sizeof(double), "stream chunk bytes");
 
-        estimated += checkedMul(stream_array, 6, "stream F/f/F1/f1/source chunk buffers");
+        estimated += checkedMul(stream_array, 8, "stream F/f/F1/f1/source chunk buffers");
         estimated += checkedMul((max_chunk_cells + 511) / 512, sizeof(double), "stream reduction buffer");
         estimated += checkedMul(static_cast<size_t>(grid.Ng), sizeof(double), "physics arrays") * 5;
         estimated += checkedMul(checkedMul(static_cast<size_t>(grid.Ng), static_cast<size_t>(grid.Ng), "stream energy kernels"),
@@ -1508,7 +1603,8 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                                      const std::string* primary_F_path,
                                      const std::string* primary_f_F_path,
                                      bool is_secondary,
-                                     double dt) {
+                                     double dt,
+                                     double* idd_accum) {
     const size_t nyz = static_cast<size_t>(grid.Ny + 1) * (grid.Nz + 1);
     const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
     const size_t n_per_E = nyz * n_angle;
@@ -1516,50 +1612,60 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
     const size_t lane_chunk = alignedLaneChunk(requested_lane_chunk, n_angle);
 
     constexpr int block_size = 256;
+    const size_t max_lanes = std::min(lane_chunk, n_per_E);
+    const size_t max_chunk_size = static_cast<size_t>(grid.Ng) * max_lanes;
+    h_stream_lane.resize(max_chunk_size);
+    h_stream_f_lane.resize(max_chunk_size);
+    if (is_secondary && primary_F_path && primary_f_F_path) {
+        h_stream_primary_lane.resize(max_chunk_size);
+        h_stream_primary_f_lane.resize(max_chunk_size);
+    }
+    cudaStream_t stream = stream_primary[0];
+
     for (size_t lane0 = 0; lane0 < n_per_E; lane0 += lane_chunk) {
         int lanes = static_cast<int>(std::min(lane_chunk, n_per_E - lane0));
         size_t chunk_size = static_cast<size_t>(grid.Ng) * lanes;
-        std::vector<double> h_lane(chunk_size);
-        std::vector<double> h_f_lane(chunk_size);
-        std::vector<double> h_primary_lane;
-        std::vector<double> h_primary_f_lane;
 
         for (int ek = 0; ek < grid.Ng; ++ek) {
             size_t src = static_cast<size_t>(ek) * n_per_E + lane0;
             size_t dst = static_cast<size_t>(ek) * lanes;
-            readStore(F_path, src, h_lane.data() + dst, lanes);
-            readStore(f_F_path, src, h_f_lane.data() + dst, lanes);
+            readStore(F_path, src, h_stream_lane.data() + dst, lanes);
+            readStore(f_F_path, src, h_stream_f_lane.data() + dst, lanes);
         }
-        CUDA_CHECK(cudaMemcpy(d_stream_F.data(),
-                              h_lane.data(),
-                              chunk_size * sizeof(double),
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_stream_f_F.data(),
-                              h_f_lane.data(),
-                              chunk_size * sizeof(double),
-                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_stream_old_F.data(),
+                                   h_stream_lane.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_stream_old_f_F.data(),
+                                   h_stream_f_lane.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
 
         if (is_secondary && primary_F_path && primary_f_F_path) {
-            h_primary_lane.resize(chunk_size);
-            h_primary_f_lane.resize(chunk_size);
             for (int ek = 0; ek < grid.Ng; ++ek) {
                 size_t src = static_cast<size_t>(ek) * n_per_E + lane0;
                 size_t dst = static_cast<size_t>(ek) * lanes;
-                readStore(*primary_F_path, src, h_primary_lane.data() + dst, lanes);
-                readStore(*primary_f_F_path, src, h_primary_f_lane.data() + dst, lanes);
+                readStore(*primary_F_path, src, h_stream_primary_lane.data() + dst, lanes);
+                readStore(*primary_f_F_path, src, h_stream_primary_f_lane.data() + dst, lanes);
             }
-            CUDA_CHECK(cudaMemcpy(d_stream_F1.data(),
-                                  h_primary_lane.data(),
-                                  chunk_size * sizeof(double),
-                                  cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_stream_primary_f_F.data(),
-                                  h_primary_f_lane.data(),
-                                  chunk_size * sizeof(double),
-                                  cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemset(d_stream_primary_F.data(), 0, chunk_size * sizeof(double)));
+            CUDA_CHECK(cudaMemcpyAsync(d_stream_F1.data(),
+                                       h_stream_primary_lane.data(),
+                                       chunk_size * sizeof(double),
+                                       cudaMemcpyHostToDevice,
+                                       stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_stream_primary_f_F.data(),
+                                       h_stream_primary_f_lane.data(),
+                                       chunk_size * sizeof(double),
+                                       cudaMemcpyHostToDevice,
+                                       stream));
+            CUDA_CHECK(cudaMemsetAsync(d_stream_primary_F.data(), 0,
+                                       chunk_size * sizeof(double),
+                                       stream));
 
             int source_grid = static_cast<int>((chunk_size + block_size - 1) / block_size);
-            streamingSecondarySourceKernel<<<source_grid, block_size>>>(
+            streamingSecondarySourceKernel<<<source_grid, block_size, 0, stream>>>(
                 d_stream_F1.data(),
                 d_stream_primary_f_F.data(),
                 d_stream_primary_F.data(),
@@ -1576,7 +1682,9 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
         }
 
         int grid_size = static_cast<int>((lanes + block_size - 1) / block_size);
-        streamingEnergyDgCnKernel<<<grid_size, block_size>>>(
+        streamingEnergyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
+            d_stream_old_F.data(),
+            d_stream_old_f_F.data(),
             d_stream_F.data(),
             d_stream_f_F.data(),
             is_secondary ? d_stream_primary_F.data() : nullptr,
@@ -1594,19 +1702,65 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
         );
         CUDA_CHECK(cudaGetLastError());
 
+        if (idd_accum) {
+            size_t num_blocks = (chunk_size + block_size * 2 - 1) / (block_size * 2);
+            if (num_blocks > d_reduction_sums.getSize()) {
+                throw std::runtime_error("Streaming energy IDD reduction buffer is too small");
+            }
+            pairDepthDoseLaneKernel<<<static_cast<int>(num_blocks),
+                                      block_size,
+                                      block_size * sizeof(double),
+                                      stream>>>(
+                d_stream_F.data(),
+                d_stream_f_F.data(),
+                d_S_s.data(),
+                d_reduction_sums.data(),
+                grid.Ng,
+                lanes,
+                grid.dg,
+                phys.density,
+                grid.du * grid.dv * grid.dy * grid.dz,
+                chunk_size
+            );
+            CUDA_CHECK(cudaGetLastError());
+            std::vector<double> h_block_sums(num_blocks);
+            CUDA_CHECK(cudaMemcpyAsync(h_block_sums.data(),
+                                       d_reduction_sums.data(),
+                                       num_blocks * sizeof(double),
+                                       cudaMemcpyDeviceToHost,
+                                       stream));
+            CUDA_CHECK(cudaMemcpyAsync(h_stream_lane.data(),
+                                       d_stream_F.data(),
+                                       chunk_size * sizeof(double),
+                                       cudaMemcpyDeviceToHost,
+                                       stream));
+            CUDA_CHECK(cudaMemcpyAsync(h_stream_f_lane.data(),
+                                       d_stream_f_F.data(),
+                                       chunk_size * sizeof(double),
+                                       cudaMemcpyDeviceToHost,
+                                       stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            for (double partial : h_block_sums) {
+                *idd_accum += partial;
+            }
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(h_stream_lane.data(),
+                                       d_stream_F.data(),
+                                       chunk_size * sizeof(double),
+                                       cudaMemcpyDeviceToHost,
+                                       stream));
+            CUDA_CHECK(cudaMemcpyAsync(h_stream_f_lane.data(),
+                                       d_stream_f_F.data(),
+                                       chunk_size * sizeof(double),
+                                       cudaMemcpyDeviceToHost,
+                                       stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        }
         for (int ek = 0; ek < grid.Ng; ++ek) {
             size_t src = static_cast<size_t>(ek) * lanes;
             size_t dst = static_cast<size_t>(ek) * n_per_E + lane0;
-            CUDA_CHECK(cudaMemcpy(h_lane.data() + src,
-                                  d_stream_F.data() + src,
-                                  lanes * sizeof(double),
-                                  cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_f_lane.data() + src,
-                                  d_stream_f_F.data() + src,
-                                  lanes * sizeof(double),
-                                  cudaMemcpyDeviceToHost));
-            writeStore(F_path, dst, h_lane.data() + src, lanes);
-            writeStore(f_F_path, dst, h_f_lane.data() + src, lanes);
+            writeStore(F_path, dst, h_stream_lane.data() + src, lanes);
+            writeStore(f_F_path, dst, h_stream_f_lane.data() + src, lanes);
         }
     }
 }
@@ -1616,31 +1770,35 @@ void BFPnSolver::streamingTransportStep(const std::string& F_path, double dt, bo
     const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
     const size_t per_energy = nyz * n_angle;
     const int energy_chunk = std::max(1, phys.streaming_energy_chunk);
+    const size_t max_chunk_size = static_cast<size_t>(std::min(energy_chunk, grid.Ng)) * per_energy;
+    h_stream_chunk.resize(max_chunk_size);
+    cudaStream_t stream = stream_primary[0];
 
     for (int e0 = 0; e0 < grid.Ng; e0 += energy_chunk) {
         int ecount = std::min(energy_chunk, grid.Ng - e0);
         size_t chunk_size = static_cast<size_t>(ecount) * per_energy;
         size_t offset = static_cast<size_t>(e0) * per_energy;
-        std::vector<double> h_chunk(chunk_size);
 
-        readStore(F_path, offset, h_chunk.data(), chunk_size);
-        CUDA_CHECK(cudaMemcpy(d_stream_F.data(),
-                              h_chunk.data(),
-                              chunk_size * sizeof(double),
-                              cudaMemcpyHostToDevice));
+        readStore(F_path, offset, h_stream_chunk.data(), chunk_size);
+        CUDA_CHECK(cudaMemcpyAsync(d_stream_F.data(),
+                                   h_stream_chunk.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
         transport_solver->solve(d_stream_F.data(),
                                 d_Omend.data(),
                                 ecount,
                                 static_cast<int>(n_angle),
                                 dt,
-                                0,
+                                stream,
                                 preserve_sign);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_chunk.data(),
-                              d_stream_F.data(),
-                              chunk_size * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        writeStore(F_path, offset, h_chunk.data(), chunk_size);
+        CUDA_CHECK(cudaMemcpyAsync(h_stream_chunk.data(),
+                                   d_stream_F.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyDeviceToHost,
+                                   stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        writeStore(F_path, offset, h_stream_chunk.data(), chunk_size);
     }
 }
 
@@ -1649,30 +1807,35 @@ void BFPnSolver::streamingAngleStep(const std::string& F_path, double dt) {
     const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
     const size_t per_energy = nyz * n_angle;
     const int energy_chunk = std::max(1, phys.streaming_energy_chunk);
+    const size_t max_chunk_size = static_cast<size_t>(std::min(energy_chunk, grid.Ng)) * per_energy;
+    h_stream_chunk.resize(max_chunk_size);
+    cudaStream_t stream = stream_primary[0];
 
     for (int e0 = 0; e0 < grid.Ng; e0 += energy_chunk) {
         int ecount = std::min(energy_chunk, grid.Ng - e0);
         size_t chunk_size = static_cast<size_t>(ecount) * per_energy;
         size_t offset = static_cast<size_t>(e0) * per_energy;
-        std::vector<double> h_chunk(chunk_size);
 
-        readStore(F_path, offset, h_chunk.data(), chunk_size);
-        CUDA_CHECK(cudaMemcpy(d_stream_F.data(),
-                              h_chunk.data(),
-                              chunk_size * sizeof(double),
-                              cudaMemcpyHostToDevice));
+        readStore(F_path, offset, h_stream_chunk.data(), chunk_size);
+        CUDA_CHECK(cudaMemcpyAsync(d_stream_F.data(),
+                                   h_stream_chunk.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
         angle_solver->solve(d_stream_F.data(),
-                            d_sig_trg.data(),
+                            d_sig_trg.data() + e0,
                             static_cast<int>(nyz),
                             ecount,
                             dt,
-                            phys.density);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_chunk.data(),
-                              d_stream_F.data(),
-                              chunk_size * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        writeStore(F_path, offset, h_chunk.data(), chunk_size);
+                            phys.density,
+                            stream);
+        CUDA_CHECK(cudaMemcpyAsync(h_stream_chunk.data(),
+                                   d_stream_F.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyDeviceToHost,
+                                   stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        writeStore(F_path, offset, h_stream_chunk.data(), chunk_size);
     }
 }
 
@@ -1699,6 +1862,9 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
               << std::endl;
 
     for (int step = 0; step < max_steps; ++step) {
+        bool compute_idd = ((step + 1) % idd_stride == 0) || (step + 1 == max_steps);
+        double idd = 0.0;
+
         streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt);
         streamingTransportStep(stream_F_path, half_dt);
         streamingTransportStep(stream_f_F_path, half_dt, true);
@@ -1706,7 +1872,8 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
         streamingAngleStep(stream_f_F_path, grid.dt);
         streamingTransportStep(stream_F_path, half_dt);
         streamingTransportStep(stream_f_F_path, half_dt, true);
-        streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt);
+        streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt,
+                            compute_idd ? &idd : nullptr);
 
         if (!phys.primary_only && step > 0) {
             streamingEnergyStep(stream_F1_path, stream_f_F1_path,
@@ -1720,14 +1887,12 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
             streamingTransportStep(stream_f_F1_path, half_dt, true);
             streamingEnergyStep(stream_F1_path, stream_f_F1_path,
                                 &stream_F_path, &stream_f_F_path,
-                                true, half_dt);
+                                true, half_dt,
+                                compute_idd ? &idd : nullptr);
         }
 
         double t = (step + 1) * grid.dt;
-        double idd = 0.0;
-        bool compute_idd = ((step + 1) % idd_stride == 0) || (step + 1 == max_steps);
         if (compute_idd) {
-            idd = computeIntegratedDepthDoseStreaming();
             idd_history.emplace_back(t, idd);
             proxy_history.emplace_back(t, 0.0);
         }
