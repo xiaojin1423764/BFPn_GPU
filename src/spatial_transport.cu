@@ -48,7 +48,7 @@ __device__ double load_clamped(
     return F[idx];
 }
 
-__global__ void spatialFluxDivergenceKernel(
+__global__ void spatialFluxDivergencePlaneKernel(
     const double* F_in,
     double* flux_div,
     const double* Omend,
@@ -59,25 +59,24 @@ __global__ void spatialFluxDivergenceKernel(
     int Ny1 = Ny + 1;
     int Nz1 = Nz + 1;
     long long nyz = static_cast<long long>(Ny1) * Nz1;
-    
-    long long total = static_cast<long long>(Ng) * nyz * NmuNom;
-    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    
-    long long s_total = gid / NmuNom;
-    int ang = static_cast<int>(gid % NmuNom);
-    int ek  = static_cast<int>(s_total / nyz);
-    long long s = s_total % nyz;
-    
+    long long yz_blocks = (nyz + blockDim.x - 1) / blockDim.x;
+
+    long long flat_block = static_cast<long long>(blockIdx.x);
+    long long plane = flat_block / yz_blocks;
+    long long yz_block = flat_block - plane * yz_blocks;
+    if (plane >= static_cast<long long>(Ng) * NmuNom) return;
+    int ek = static_cast<int>(plane / NmuNom);
+    int ang = static_cast<int>(plane - static_cast<long long>(ek) * NmuNom);
+    long long s = yz_block * blockDim.x + threadIdx.x;
+    if (s >= nyz) return;
+
     int j = static_cast<int>(s / Ny1);
-    int i = static_cast<int>(s % Ny1);
-    
+    int i = static_cast<int>(s - static_cast<long long>(j) * Ny1);
     long long base = (static_cast<long long>(ek) * nyz + s) * NmuNom + ang;
-    
-    // 方向余弦（这里假定 Omend 存的是 (omega_y, omega_z)）
+
     double omega_y = Omend[2 * ang + 0];
     double omega_z = Omend[2 * ang + 1];
-    
+
     double c = F_in[base];
 
     double ym2 = load_clamped(F_in, ek, ang, i - 2, j, Ny, Nz, NmuNom);
@@ -185,8 +184,13 @@ void SpatialTransportSolver::solve(double* F, const double* Omend,
                                     int Ng, int NmuNom, double dt,
                                     cudaStream_t stream,
                                     bool preserve_sign) {
-    // 显式MUSCL格式：在物理空间直接对 y、z 方向做平流更新。
-    // 为了避免读写冲突，使用临时数组存放 F_new。
+    solveEq18(F, Omend, Ng, NmuNom, dt, stream, preserve_sign);
+}
+
+void SpatialTransportSolver::solveEq18(double* F, const double* Omend,
+                                        int Ng, int NmuNom, double dt,
+                                        cudaStream_t stream,
+                                        bool preserve_sign) {
     long long Ny1 = Ny + 1;
     long long Nz1 = Nz + 1;
     long long nyz_ll = Ny1 * Nz1;
@@ -201,8 +205,10 @@ void SpatialTransportSolver::solve(double* F, const double* Omend,
     
     int block_size = 256;
     int grid_size  = static_cast<int>((total + block_size - 1) / block_size);
-    
-    spatialFluxDivergenceKernel<<<grid_size, block_size, 0, stream>>>(
+    long long yz_blocks = (nyz_ll + block_size - 1) / block_size;
+    long long plane_blocks = static_cast<long long>(Ng) * NmuNom * yz_blocks;
+
+    spatialFluxDivergencePlaneKernel<<<static_cast<int>(plane_blocks), block_size, 0, stream>>>(
         F,
         d_flux_old.data(),
         Omend,
@@ -222,7 +228,7 @@ void SpatialTransportSolver::solve(double* F, const double* Omend,
     );
     CUDA_CHECK(cudaGetLastError());
 
-    spatialFluxDivergenceKernel<<<grid_size, block_size, 0, stream>>>(
+    spatialFluxDivergencePlaneKernel<<<static_cast<int>(plane_blocks), block_size, 0, stream>>>(
         d_F_pred.data(),
         d_flux_pred.data(),
         Omend,

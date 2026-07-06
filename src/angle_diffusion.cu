@@ -304,8 +304,15 @@ void AngleDiffusionSolver::initializeDiffusionFactor(
 
 void AngleDiffusionSolver::solve(double* F, const double* sig_trg,
                                   int nyz, int Ng, double dt, double density, cudaStream_t stream) {
-    int batch = Ng * nyz;
-    int total = batch * n_angle;
+    solveEq19(F, sig_trg, nyz, Ng, dt, density, stream);
+}
+
+void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
+                                      int nyz, int Ng, double dt,
+                                      double density, cudaStream_t stream) {
+    int plane_batch = Ng * nyz;
+    int total = plane_batch * n_angle;
+    int batch = plane_batch;
     if (batch <= 0) return;
 
     if (Nom <= 32 && Nmu <= 32) {

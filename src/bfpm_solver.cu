@@ -1767,35 +1767,35 @@ void BFPnSolver::stepPrimary(int ping, double t) {
     CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
 
     if (!phys.no_transport) {
-        transport_solver->solve(d_F.data(), d_Omend.data(),
-                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                               stream_primary[0], phys.no_spatial_clipping);
+        transport_solver->solveEq18(d_F.data(), d_Omend.data(),
+                                    grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                                    stream_primary[0], phys.no_spatial_clipping);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
-        transport_solver->solve(d_f_F.data(), d_Omend.data(),
-                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                               stream_primary[0], true);
+        transport_solver->solveEq18(d_f_F.data(), d_Omend.data(),
+                                    grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                                    stream_primary[0], true);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
     }
 
     if (!phys.no_angle) {
-        angle_solver->solve(d_F.data(), d_sig_trg.data(),
-                           (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
-                           phys.density, stream_primary[0]);
+        angle_solver->solveEq19(d_F.data(), d_sig_trg.data(),
+                                (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
+                                phys.density, stream_primary[0]);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
-        angle_solver->solve(d_f_F.data(), d_sig_trg.data(),
-                           (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
-                           phys.density, stream_primary[0]);
+        angle_solver->solveEq19(d_f_F.data(), d_sig_trg.data(),
+                                (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
+                                phys.density, stream_primary[0]);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
     }
 
     if (!phys.no_transport) {
-        transport_solver->solve(d_F.data(), d_Omend.data(),
-                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                               stream_primary[0], phys.no_spatial_clipping);
+        transport_solver->solveEq18(d_F.data(), d_Omend.data(),
+                                    grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                                    stream_primary[0], phys.no_spatial_clipping);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
-        transport_solver->solve(d_f_F.data(), d_Omend.data(),
-                               grid.Ng, grid.Nmu*grid.Nom, half_dt,
-                               stream_primary[0], true);
+        transport_solver->solveEq18(d_f_F.data(), d_Omend.data(),
+                                    grid.Ng, grid.Nmu*grid.Nom, half_dt,
+                                    stream_primary[0], true);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
     }
 
@@ -1837,27 +1837,27 @@ void BFPnSolver::stepSecondary(int ping, int pong, double t) {
                         stream_secondary);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
 
-    transport_solver->solve(d_F1.data(), d_Omend.data(),
-                             grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary);
+    transport_solver->solveEq18(d_F1.data(), d_Omend.data(),
+                                grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
-    transport_solver->solve(d_f_F1.data(), d_Omend.data(),
-                             grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary, true);
-    CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
-
-    angle_solver->solve(d_F1.data(), d_sig_trg.data(),
-                       (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
-                       phys.density, stream_secondary);
-    CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
-    angle_solver->solve(d_f_F1.data(), d_sig_trg.data(),
-                       (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
-                       phys.density, stream_secondary);
+    transport_solver->solveEq18(d_f_F1.data(), d_Omend.data(),
+                                grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary, true);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
 
-    transport_solver->solve(d_F1.data(), d_Omend.data(),
-                             grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary);
+    angle_solver->solveEq19(d_F1.data(), d_sig_trg.data(),
+                            (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
+                            phys.density, stream_secondary);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
-    transport_solver->solve(d_f_F1.data(), d_Omend.data(),
-                             grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary, true);
+    angle_solver->solveEq19(d_f_F1.data(), d_sig_trg.data(),
+                            (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
+                            phys.density, stream_secondary);
+    CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+
+    transport_solver->solveEq18(d_F1.data(), d_Omend.data(),
+                                grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary);
+    CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+    transport_solver->solveEq18(d_f_F1.data(), d_Omend.data(),
+                                grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary, true);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
 
     energy_solver->solveSecondaryFromPrimary(d_F1.data(), d_f_F1.data(),

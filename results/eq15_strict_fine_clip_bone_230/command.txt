@@ -1,0 +1,1 @@
+/home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 2000 --time 40 --material bone --energy 230 --ny 8 --nz 8 --ng 500 --nmu 7 --nom 7 --energy-model eq15

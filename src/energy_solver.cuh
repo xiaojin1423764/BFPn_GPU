@@ -35,6 +35,11 @@ private:
     DeviceArray<double> d_f_old;
     DeviceArray<double> d_F_new;
     DeviceArray<double> d_f_new;
+    DeviceArray<double> d_F_from_f;
+    DeviceArray<double> d_F_from_hi;
+    DeviceArray<double> d_rhs4;
+    DeviceArray<double> d_rhs_high_coeff;
+    DeviceArray<double> d_coe;
     DeviceArray<double> d_collision_F_temp;
     DeviceArray<double> d_collision_f_temp;
     

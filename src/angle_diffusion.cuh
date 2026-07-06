@@ -45,9 +45,12 @@ public:
     void initializeDiffusionFactor(const double* sig_trg, double du, double dv, double dt,
                                    double density);
     
-    // 执行角度扩散: 对每个空间点和能量层
+    // Eq. (19): run one angular UV plane for every (energy, YZ cell) pair.
     void solve(double* F, const double* sig_trg, 
                int nyz, int Ng, double dt, double density, cudaStream_t stream = 0);
+    void solveEq19(double* F, const double* sig_trg,
+                   int nyz, int Ng, double dt, double density,
+                   cudaStream_t stream = 0);
     
     // 批量处理版本
     void solveBatch(double* F, const double* sig_trg,

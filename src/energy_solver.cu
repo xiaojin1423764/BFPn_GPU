@@ -126,6 +126,130 @@ __global__ void energyDgCnKernel(
     }
 }
 
+__global__ void energyDgCnPrecomputeKernel(
+    const double* F_old,
+    const double* f_old,
+    double* F_from_f_out,
+    double* F_from_hi_out,
+    double* rhs4_out,
+    double* rhs_base_out,
+    double* rhs_high_coeff_out,
+    double* coe_out,
+    const double* S_s,
+    const double* sigma_c,
+    const double* T_c,
+    int Ng,
+    int nyz,
+    int NmuNom,
+    double dt,
+    double dg,
+    double density,
+    bool is_secondary,
+    const double* source_term,
+    const double* source_term_f,
+    bool enable_straggling
+) {
+    const long long n_per_E = static_cast<long long>(nyz) * NmuNom;
+    const long long total = static_cast<long long>(Ng) * n_per_E;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    int ek = static_cast<int>(gid / n_per_E);
+    long long lane = gid - static_cast<long long>(ek) * n_per_E;
+    const double dg2 = max(dg * dg, Numerics::EPSILON);
+
+    auto load = [&](const double* arr, int group) -> double {
+        if (!arr || group < 0 || group >= Ng) return 0.0;
+        return arr[static_cast<long long>(group) * n_per_E + lane];
+    };
+
+    double Fg = F_old[gid];
+    double fg = f_old ? f_old[gid] : 0.0;
+    double sig = max(sigma_c[ek], 0.0);
+    double S_lo = max(S_s[ek], 0.0);
+    double S_hi = max(S_s[ek + 1], 0.0);
+    double source = (is_secondary && source_term) ? source_term[gid] : 0.0;
+    double source2 = (is_secondary && source_term_f) ? source_term_f[gid] : 0.0;
+    double T_g = (enable_straggling && T_c) ? max(T_c[ek], 0.0) : 0.0;
+    double T_hi = (enable_straggling && T_c && ek + 1 < Ng) ? max(T_c[ek + 1], 0.0) : 0.0;
+    double T_lo = (enable_straggling && T_c && ek > 0) ? max(T_c[ek - 1], 0.0) : 0.0;
+
+    const double p1_hi = load(F_old, ek + 1);
+    const double p2_hi = load(f_old, ek + 1);
+    const double p1_lo = load(F_old, ek - 1);
+    const double up = p1_hi - p2_hi;
+    const double cur = Fg - fg;
+
+    const double den_F = max(1.0 / dt + 0.5 * density * S_lo / dg + 0.5 * sig,
+                             Numerics::EPSILON);
+    const double inv_F = 1.0 / den_F;
+    const double A = (1.5 * density * S_hi / dg) * inv_F;
+    const double F_from_f = (0.5 * density * S_lo / dg) * inv_F;
+    const double F_from_hi = (0.5 * density * S_hi / dg) * inv_F;
+    const double strag_rhs = 0.5 * density * T_hi / dg2 * p1_hi
+                           + 0.5 * density * T_lo / dg2 * p1_lo
+                           - density * T_g / dg2 * Fg;
+    const double common_rhs = 0.5 * density * S_hi / dg * up
+                            - 0.5 * density * S_lo / dg * cur
+                            - 0.5 * sig * Fg
+                            + Fg / dt
+                            + strag_rhs
+                            + source;
+    const double rhs4 = inv_F * common_rhs;
+
+    const double rhs1e = fg / dt - 0.5 * sig * fg;
+    const double rhs2e = 1.5 * density * S_hi / dg * up
+                       + 1.5 * density * S_lo / dg * cur
+                       - 1.5 * density * (S_lo + S_hi) / dg * Fg
+                       - 0.5 * density * (S_hi - S_lo) / dg * fg;
+    const double rhs3e = A * common_rhs;
+    const double high2 = 1.5 * density * S_hi / dg;
+    const double high_coeff = high2 - A * 0.5 * density * S_hi / dg;
+    const double coe = 1.0 / dt + 0.5 * sig
+                     + 1.5 * density * S_lo / dg
+                     + 0.5 * density * (S_hi - S_lo) / dg
+                     + A * 0.5 * density * S_lo / dg;
+
+    F_from_f_out[gid] = F_from_f;
+    F_from_hi_out[gid] = F_from_hi;
+    rhs4_out[gid] = rhs4;
+    rhs_base_out[gid] = rhs1e + rhs2e - rhs3e + source2;
+    rhs_high_coeff_out[gid] = high_coeff;
+    coe_out[gid] = max(coe, Numerics::EPSILON);
+}
+
+__global__ void energyDgCnSolveFromPrecomputeKernel(
+    const double* F_from_f,
+    const double* F_from_hi,
+    const double* rhs4,
+    const double* rhs_base,
+    const double* rhs_high_coeff,
+    const double* coe,
+    double* F_new,
+    double* f_new,
+    int Ng,
+    int nyz,
+    int NmuNom
+) {
+    const long long n_per_E = static_cast<long long>(nyz) * NmuNom;
+    long long lane = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (lane >= n_per_E) return;
+
+    double next_F = 0.0;
+    double next_f = 0.0;
+    for (int ek = Ng - 1; ek >= 0; --ek) {
+        long long idx = static_cast<long long>(ek) * n_per_E + lane;
+        double hi_delta = next_F - next_f;
+        double f_val = (rhs_base[idx] + rhs_high_coeff[idx] * hi_delta) / coe[idx];
+        double F_val = F_from_f[idx] * f_val + rhs4[idx] + F_from_hi[idx] * hi_delta;
+
+        F_new[idx] = F_val;
+        f_new[idx] = f_val;
+        next_F = F_val;
+        next_f = f_val;
+    }
+}
+
 __global__ void secondarySourceFromPrimaryKernel(
     const double* F_primary,
     const double* f_primary,
@@ -302,6 +426,14 @@ void EnergyDepositionSolver::solve(
         d_f_old.allocate(static_cast<size_t>(total));
         d_F_new.allocate(static_cast<size_t>(total));
         d_f_new.allocate(static_cast<size_t>(total));
+        d_F_from_f.allocate(static_cast<size_t>(total));
+        d_F_from_hi.allocate(static_cast<size_t>(total));
+        d_rhs4.allocate(static_cast<size_t>(total));
+        d_rhs_high_coeff.allocate(static_cast<size_t>(total));
+        d_coe.allocate(static_cast<size_t>(total));
+    }
+    if (d_rhs_buffer.getSize() < static_cast<size_t>(total)) {
+        d_rhs_buffer.allocate(static_cast<size_t>(total));
     }
 
     CUDA_CHECK(cudaMemcpyAsync(d_F_old.data(), F,
@@ -314,15 +446,46 @@ void EnergyDepositionSolver::solve(
     int block_size = 256;
     int grid_size  = static_cast<int>((n_per_E + block_size - 1) / block_size);
 
-    energyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
-        d_F_old.data(), d_f_old.data(),
-        d_F_new.data(), d_f_new.data(),
-        S_s, sigma_c, T_c,
-        Ng, nyz, NmuNom,
-        dt, dg, density,
-        is_secondary, source_term, source_term_f, use_legacy, enable_straggling
-    );
-    CUDA_CHECK(cudaGetLastError());
+    if (use_legacy) {
+        energyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
+            d_F_old.data(), d_f_old.data(),
+            d_F_new.data(), d_f_new.data(),
+            S_s, sigma_c, T_c,
+            Ng, nyz, NmuNom,
+            dt, dg, density,
+            is_secondary, source_term, source_term_f, use_legacy, enable_straggling
+        );
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        int total_grid = static_cast<int>((total + block_size - 1) / block_size);
+        energyDgCnPrecomputeKernel<<<total_grid, block_size, 0, stream>>>(
+            d_F_old.data(), d_f_old.data(),
+            d_F_from_f.data(),
+            d_F_from_hi.data(),
+            d_rhs4.data(),
+            d_rhs_buffer.data(),
+            d_rhs_high_coeff.data(),
+            d_coe.data(),
+            S_s, sigma_c, T_c,
+            Ng, nyz, NmuNom,
+            dt, dg, density,
+            is_secondary, source_term, source_term_f, enable_straggling
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        energyDgCnSolveFromPrecomputeKernel<<<grid_size, block_size, 0, stream>>>(
+            d_F_from_f.data(),
+            d_F_from_hi.data(),
+            d_rhs4.data(),
+            d_rhs_buffer.data(),
+            d_rhs_high_coeff.data(),
+            d_coe.data(),
+            d_F_new.data(),
+            d_f_new.data(),
+            Ng, nyz, NmuNom
+        );
+        CUDA_CHECK(cudaGetLastError());
+    }
 
     CUDA_CHECK(cudaMemcpyAsync(F, d_F_new.data(),
                                static_cast<size_t>(total) * sizeof(double),

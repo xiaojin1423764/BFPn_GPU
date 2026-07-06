@@ -28,11 +28,11 @@ Step 1100, t = 22/40, IDD = -5.45466e-228
 Step 1200, t = 24/40, IDD = -5.74334e-254
 Step 1300, t = 26/40, IDD = -1.3924e-281
 Step 1400, t = 28/40, IDD = 3.08851e-307
-Step 1500, t = 30/40, IDD = -1.73022e-320
-Step 1600, t = 32/40, IDD = -2.24948e-320
-Step 1700, t = 34/40, IDD = -2.7475e-320
-Step 1800, t = 36/40, IDD = -1.78605e-320
-Step 1900, t = 38/40, IDD = -1.88387e-320
-Step 2000, t = 40/40, IDD = -1.6482e-320
+Step 1500, t = 30/40, IDD = 4.5706e-320
+Step 1600, t = 32/40, IDD = 4.15361e-320
+Step 1700, t = 34/40, IDD = 5.47029e-320
+Step 1800, t = 36/40, IDD = 4.67485e-320
+Step 1900, t = 38/40, IDD = 4.32554e-320
+Step 2000, t = 40/40, IDD = 4.64175e-320
 Solver completed. Paper-style IDD saved to idd_output.txt
 Diagnostic scalar proxy saved to dose_output.txt

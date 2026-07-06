@@ -34,11 +34,15 @@ public:
     void initializeTransportFactor(const double* Omend, 
                                     double dt, int NmuNom);
     
-    // 执行空间传输
+    // Eq. (18): run one YZ transport plane for every (energy, angle) pair.
     void solve(double* F, const double* Omend,
                int Ng, int NmuNom, double dt, 
                cudaStream_t stream = 0,
                bool preserve_sign = false);
+    void solveEq18(double* F, const double* Omend,
+                   int Ng, int NmuNom, double dt,
+                   cudaStream_t stream = 0,
+                   bool preserve_sign = false);
 };
 
 #endif
