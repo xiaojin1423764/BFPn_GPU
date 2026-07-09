@@ -124,6 +124,7 @@ private:
     DeviceArray<double> d_stream_old_F, d_stream_old_f_F;
     std::string stream_F_path, stream_f_F_path;
     std::string stream_F1_path, stream_f_F1_path;
+    std::string stream_source_path;
     mutable std::unordered_map<std::string, int> stream_fds;
     HostDoubleBuffer h_stream_lane;
     HostDoubleBuffer h_stream_f_lane;
@@ -178,9 +179,19 @@ private:
                              const std::string* primary_f_F_path,
                              bool is_secondary,
                              double dt,
-                             double* idd_accum = nullptr);
+                             double* idd_accum = nullptr,
+                             bool reuse_secondary_source = false,
+                             const std::string* secondary_source_cache_path = nullptr,
+                             bool read_cached_secondary_source = false,
+                             bool write_cached_secondary_source = false);
     void streamingTransportStep(const std::string& F_path, double dt, bool preserve_sign = false);
+    void streamingTransportPairStep(const std::string& F_path,
+                                    const std::string& f_F_path,
+                                    double dt);
     void streamingAngleStep(const std::string& F_path, double dt);
+    void streamingAnglePairStep(const std::string& F_path,
+                                const std::string& f_F_path,
+                                double dt);
     double computeScalarDoseProxy();
     double computeEnergyFlux(const double* F, const double* f_F);
     double computeIntegratedDepthDose();

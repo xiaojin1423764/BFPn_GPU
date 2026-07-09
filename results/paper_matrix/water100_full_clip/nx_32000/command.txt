@@ -1,1 +1,0 @@
-/home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 32000 --time 8.0 --material water --energy 100.0 --ny 6 --nz 6 --ng 50 --nmu 5 --nom 5 --energy-model eq15 --save-energy-moments

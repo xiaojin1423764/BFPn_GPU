@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
     double ly = DefaultGrid::LY;
     double lz = DefaultGrid::LZ;
     double beam_energy = 230.0;
+    double sigma_e = 1.0;
     double sigma_yz = 0.1;
     double density = 1.0;
     double energy_density = 1.0;
@@ -86,6 +87,8 @@ int main(int argc, char** argv) {
             tFinal = std::stod(argv[++i]);
         } else if (arg == "--energy" && i + 1 < argc) {
             beam_energy = std::stod(argv[++i]);
+        } else if (arg == "--sigma-e" && i + 1 < argc) {
+            sigma_e = std::stod(argv[++i]);
         } else if (arg == "--rho" && i + 1 < argc) {
             density = std::stod(argv[++i]);
             energy_density = density;
@@ -170,6 +173,7 @@ int main(int argc, char** argv) {
                       << "  --data <path>    Data file directory (default: ./data)\n"
                       << "  --time <value>   Final simulation time (default: 40.0)\n"
                       << "  --energy <MeV>   Incoming beam energy E0 (default: 230.0)\n"
+                      << "  --sigma-e <MeV>  Initial energy Gaussian sigma (default: 1.0)\n"
                       << "  --material <name> Material density preset: water, bone, air\n"
                       << "  --rho <value>    Override material density in g/cm^3\n"
                       << "  --ny <value>     Y grid cells (paper Figure 3 uses 80)\n"
@@ -240,7 +244,7 @@ int main(int argc, char** argv) {
     
     // 配置物理参数
     PhysicsParams phys;
-    phys.sig_E = 1.0;
+    phys.sig_E = sigma_e;
     phys.a_1 = 1.0 / 2.0 / sigma_yz / sigma_yz;
     phys.a_2 = 1.0 / 2.0 / 1e-6 / 1e-6;
     phys.C_c = 1.0 / sqrt(2.0 * Physics::PI * 0.1 * 1e-6);
