@@ -128,6 +128,8 @@ private:
     // 内核数组
     DeviceArray<double> d_ker_e, d_ker_e1, d_ker_e2;  // 能量核
     DeviceArray<double> d_ker_v;                      // 角度核 [Ng][Nangle][Nangle]
+    DeviceArray<int> d_ker_v_col_ptr, d_ker_v_in_idx; // streaming source sparse angle kernel
+    DeviceArray<double> d_ker_v_sparse_values;
     DeviceArray<int> d_ker_e_begin, d_ker_e_end;      // 每个输出能量的非零源能量范围
 
     // Out-of-core streaming state for full-grid development.
@@ -196,7 +198,8 @@ private:
                              bool reuse_secondary_source = false,
                              const std::string* secondary_source_cache_path = nullptr,
                              bool read_cached_secondary_source = false,
-                             bool write_cached_secondary_source = false);
+                             bool write_cached_secondary_source = false,
+                             EnergyTiming* timing = nullptr);
     void streamingTransportStep(const std::string& F_path, double dt, bool preserve_sign = false);
     void streamingTransportPairStep(const std::string& F_path,
                                     const std::string& f_F_path,

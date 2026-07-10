@@ -11,6 +11,7 @@ struct EnergyTiming {
     double recurrence_seconds = 0.0;
     double copy_out_seconds = 0.0;
     double secondary_source_seconds = 0.0;
+    double secondary_source_io_seconds = 0.0;
     double secondary_update_seconds = 0.0;
 };
 

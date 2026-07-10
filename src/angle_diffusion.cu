@@ -435,6 +435,9 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
         if (d_sine_coeff.getSize() < static_cast<size_t>(Ng) * n_angle) {
             d_sine_coeff.allocate(static_cast<size_t>(Ng) * n_angle);
         }
+        if (d_diffusion_factor.getSize() < static_cast<size_t>(Ng) * n_angle) {
+            d_diffusion_factor.allocate(static_cast<size_t>(Ng) * n_angle);
+        }
         buildDiffusionFactorKernel<<<(Ng * n_angle + 255) / 256, 256, 0, stream>>>(
             d_diffusion_factor.data(), sig_trg,
             Nom, Nmu, n_angle, Ng, cached_du, cached_dv, dt, density

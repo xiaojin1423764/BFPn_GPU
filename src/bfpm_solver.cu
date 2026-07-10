@@ -104,7 +104,8 @@ void printStepProfile(const StepProfile& profile) {
     const EnergyTiming& e = profile.energy_timing;
     const double detailed = e.copy_in_seconds + e.legacy_kernel_seconds
                           + e.precompute_seconds + e.recurrence_seconds
-                          + e.copy_out_seconds + e.secondary_source_seconds;
+                          + e.copy_out_seconds + e.secondary_source_seconds
+                          + e.secondary_source_io_seconds;
     if (detailed > 0.0) {
         auto epct = [&](double seconds) {
             return profile.energy_seconds > 0.0 ? 100.0 * seconds / profile.energy_seconds : 0.0;
@@ -114,6 +115,8 @@ void printStepProfile(const StepProfile& profile) {
                   << ", " << epct(profile.primary_energy_solve_seconds) << "% of energy\n"
                   << "  secondary source    " << e.secondary_source_seconds << " s"
                   << ", " << epct(e.secondary_source_seconds) << "% of energy\n"
+                  << "  secondary source I/O " << e.secondary_source_io_seconds << " s"
+                  << ", " << epct(e.secondary_source_io_seconds) << "% of energy\n"
                   << "  secondary update    " << e.secondary_update_seconds << " s"
                   << ", " << epct(e.secondary_update_seconds) << "% of energy\n"
                   << "  copy in             " << e.copy_in_seconds << " s"
@@ -649,7 +652,9 @@ __global__ void streamingSecondarySourceKernel(
     double* source_F,
     const double* ker_e1,
     const double* ker_e2,
-    const double* ker_v,
+    const int* ker_v_col_ptr,
+    const int* ker_v_in_idx,
+    const double* ker_v_values,
     const int* ker_e_begin,
     const int* ker_e_end,
     int Ng,
@@ -676,12 +681,13 @@ __global__ void streamingSecondarySourceKernel(
         double e2 = ker_e2[static_cast<long long>(out_e) * Ng + src_e];
         if (e1 == 0.0 && e2 == 0.0) continue;
 
-        const double* kv = ker_v + static_cast<long long>(src_e) * NmuNom * NmuNom;
-        for (int in_ang = 0; in_ang < NmuNom; ++in_ang) {
-            int src_lane = lane_base + in_ang;
+        const int ptr_base = src_e * (NmuNom + 1) + out_ang;
+        const int begin = ker_v_col_ptr[ptr_base];
+        const int end = ker_v_col_ptr[ptr_base + 1];
+        for (int p = begin; p < end; ++p) {
+            int src_lane = lane_base + ker_v_in_idx[p];
             if (src_lane < 0 || src_lane >= lanes) continue;
-            double w = kv[static_cast<long long>(in_ang) * NmuNom + out_ang];
-            if (w == 0.0) continue;
+            double w = ker_v_values[p];
             long long src = static_cast<long long>(src_e) * lanes + src_lane;
             q1 += max(primary_F[src], 0.0) * e1 * w;
             q2 += primary_f[src] * e2 * w;
@@ -945,6 +951,7 @@ void BFPnSolver::allocateMemory() {
         d_ker_e1.allocate(grid.Ng * grid.Ng);
         d_ker_e2.allocate(grid.Ng * grid.Ng);
         d_ker_v.allocate(grid.Ng * n_angle * n_angle);
+        d_ker_v_col_ptr.allocate(grid.Ng * (n_angle + 1));
         return;
     }
 
@@ -983,6 +990,7 @@ void BFPnSolver::allocateMemory() {
         d_ker_e1.allocate(grid.Ng * grid.Ng);
         d_ker_e2.allocate(grid.Ng * grid.Ng);
         d_ker_v.allocate(grid.Ng * n_angle * n_angle);
+        d_ker_v_col_ptr.allocate(grid.Ng * (n_angle + 1));
     }
 }
 
@@ -1356,8 +1364,16 @@ void BFPnSolver::initializeKernels() {
     }
 
     std::vector<double> h_ker_v(static_cast<size_t>(grid.Ng) * n_angle * n_angle, 0.0);
+    std::vector<int> h_ker_v_col_ptr(static_cast<size_t>(grid.Ng) * (n_angle + 1), 0);
+    std::vector<int> h_ker_v_in_idx;
+    std::vector<double> h_ker_v_sparse_values;
     for (int ek = 0; ek < grid.Ng - 1; ++ek) {
         if (h_mu[ek * 3 + 0] == 0.0 || h_mu[ek * 3 + 1] == 0.0) {
+            const size_t ptr_base = static_cast<size_t>(ek) * (n_angle + 1);
+            const int offset = static_cast<int>(h_ker_v_sparse_values.size());
+            for (int out = 0; out <= n_angle; ++out) {
+                h_ker_v_col_ptr[ptr_base + out] = offset;
+            }
             continue;
         }
 
@@ -1387,9 +1403,35 @@ void BFPnSolver::initializeKernels() {
                 }
             }
         }
+
+        const size_t ptr_base = static_cast<size_t>(ek) * (n_angle + 1);
+        for (int out = 0; out < n_angle; ++out) {
+            h_ker_v_col_ptr[ptr_base + out] = static_cast<int>(h_ker_v_sparse_values.size());
+            for (int in = 0; in < n_angle; ++in) {
+                double value = h_ker_v[(static_cast<size_t>(ek) * n_angle + in) * n_angle + out];
+                if (value != 0.0) {
+                    h_ker_v_in_idx.push_back(in);
+                    h_ker_v_sparse_values.push_back(value);
+                }
+            }
+        }
+        h_ker_v_col_ptr[ptr_base + n_angle] = static_cast<int>(h_ker_v_sparse_values.size());
+    }
+    const size_t last_ptr_base = static_cast<size_t>(grid.Ng - 1) * (n_angle + 1);
+    const int last_offset = static_cast<int>(h_ker_v_sparse_values.size());
+    for (int out = 0; out <= n_angle; ++out) {
+        h_ker_v_col_ptr[last_ptr_base + out] = last_offset;
     }
 
     d_ker_v.copyFromHost(h_ker_v.data(), static_cast<size_t>(grid.Ng) * n_angle * n_angle);
+    d_ker_v_col_ptr.copyFromHost(h_ker_v_col_ptr.data(), h_ker_v_col_ptr.size());
+    d_ker_v_in_idx.allocate(h_ker_v_in_idx.size());
+    d_ker_v_sparse_values.allocate(h_ker_v_sparse_values.size());
+    if (!h_ker_v_in_idx.empty()) {
+        d_ker_v_in_idx.copyFromHost(h_ker_v_in_idx.data(), h_ker_v_in_idx.size());
+        d_ker_v_sparse_values.copyFromHost(h_ker_v_sparse_values.data(),
+                                           h_ker_v_sparse_values.size());
+    }
 }
 
 void BFPnSolver::initializeDistribution() {
@@ -1735,7 +1777,8 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                                      bool reuse_secondary_source,
                                      const std::string* secondary_source_cache_path,
                                      bool read_cached_secondary_source,
-                                     bool write_cached_secondary_source) {
+                                     bool write_cached_secondary_source,
+                                     EnergyTiming* timing) {
     const size_t nyz = static_cast<size_t>(grid.Ny + 1) * (grid.Nz + 1);
     const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
     const size_t n_per_E = nyz * n_angle;
@@ -1780,6 +1823,7 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
             }
         };
 
+        auto timing_start = Clock::now();
         read_lane_chunk(F_path, h_stream_lane.data());
         read_lane_chunk(f_F_path, h_stream_f_lane.data());
         CUDA_CHECK(cudaMemcpyAsync(d_stream_old_F.data(),
@@ -1792,6 +1836,10 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                                    chunk_size * sizeof(double),
                                    cudaMemcpyHostToDevice,
                                    stream));
+        if (timing) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            timing->copy_in_seconds += secondsSince(timing_start);
+        }
 
         const bool can_reuse_source = is_secondary && reuse_secondary_source &&
                                       primary_F_path && primary_f_F_path &&
@@ -1804,13 +1852,19 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                                              write_cached_secondary_source &&
                                              secondary_source_cache_path;
         if (can_read_cached_source) {
+            timing_start = Clock::now();
             read_lane_chunk(*secondary_source_cache_path, h_stream_primary_lane.data());
             CUDA_CHECK(cudaMemcpyAsync(d_stream_primary_F.data(),
                                        h_stream_primary_lane.data(),
                                        chunk_size * sizeof(double),
                                        cudaMemcpyHostToDevice,
                                        stream));
+            if (timing) {
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                timing->secondary_source_io_seconds += secondsSince(timing_start);
+            }
         } else if (is_secondary && primary_F_path && primary_f_F_path && !can_reuse_source) {
+            timing_start = Clock::now();
             read_lane_chunk(*primary_F_path, h_stream_primary_lane.data());
             read_lane_chunk(*primary_f_F_path, h_stream_primary_f_lane.data());
             CUDA_CHECK(cudaMemcpyAsync(d_stream_F1.data(),
@@ -1826,6 +1880,11 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
             CUDA_CHECK(cudaMemsetAsync(d_stream_primary_F.data(), 0,
                                        chunk_size * sizeof(double),
                                        stream));
+            if (timing) {
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                timing->secondary_source_io_seconds += secondsSince(timing_start);
+                timing_start = Clock::now();
+            }
 
             int source_grid = static_cast<int>((chunk_size + block_size - 1) / block_size);
             streamingSecondarySourceKernel<<<source_grid, block_size, 0, stream>>>(
@@ -1834,7 +1893,9 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                 d_stream_primary_F.data(),
                 d_ker_e1.data(),
                 d_ker_e2.data(),
-                d_ker_v.data(),
+                d_ker_v_col_ptr.data(),
+                d_ker_v_in_idx.data(),
+                d_ker_v_sparse_values.data(),
                 d_ker_e_begin.data(),
                 d_ker_e_end.data(),
                 grid.Ng,
@@ -1844,8 +1905,13 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                 grid.dg
             );
             CUDA_CHECK(cudaGetLastError());
+            if (timing) {
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                timing->secondary_source_seconds += secondsSince(timing_start);
+            }
         }
 
+        timing_start = Clock::now();
         int grid_size = static_cast<int>((lanes + block_size - 1) / block_size);
         streamingEnergyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
             d_stream_old_F.data(),
@@ -1866,7 +1932,12 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
             is_secondary
         );
         CUDA_CHECK(cudaGetLastError());
+        if (timing) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            timing->recurrence_seconds += secondsSince(timing_start);
+        }
 
+        timing_start = Clock::now();
         if (idd_accum) {
             size_t num_blocks = (chunk_size + block_size * 2 - 1) / (block_size * 2);
             if (num_blocks > d_reduction_sums.getSize()) {
@@ -1935,11 +2006,20 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
             }
             CUDA_CHECK(cudaStreamSynchronize(stream));
         }
+        double source_write_seconds = 0.0;
         if (can_write_cached_source) {
+            auto source_io_start = Clock::now();
             write_lane_chunk(*secondary_source_cache_path, h_stream_primary_lane.data());
+            if (timing) {
+                source_write_seconds = secondsSince(source_io_start);
+                timing->secondary_source_io_seconds += source_write_seconds;
+            }
         }
         write_lane_chunk(F_path, h_stream_lane.data());
         write_lane_chunk(f_F_path, h_stream_f_lane.data());
+        if (timing) {
+            timing->copy_out_seconds += secondsSince(timing_start) - source_write_seconds;
+        }
     }
 }
 
@@ -2273,16 +2353,23 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
         bool compute_idd = ((step + 1) % idd_stride == 0) || (step + 1 == max_steps);
         double idd = 0.0;
 
+        EnergyTiming* energy_timing = phys.profile_steps ? &profile.energy_timing : nullptr;
         auto phase_start = Clock::now();
-        streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt);
-        profile.energy_seconds += secondsSince(phase_start);
+        streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt,
+                            nullptr, false, nullptr, false, false, energy_timing);
+        double phase_seconds = secondsSince(phase_start);
+        profile.energy_seconds += phase_seconds;
+        profile.primary_energy_solve_seconds += phase_seconds;
         streamingTransportAngleTransportPairStep(stream_F_path, stream_f_F_path,
                                                  half_dt, grid.dt,
                                                  phys.profile_steps ? &profile : nullptr);
         phase_start = Clock::now();
         streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt,
-                            compute_idd ? &idd : nullptr);
-        profile.energy_seconds += secondsSince(phase_start);
+                            compute_idd ? &idd : nullptr,
+                            false, nullptr, false, false, energy_timing);
+        phase_seconds = secondsSince(phase_start);
+        profile.energy_seconds += phase_seconds;
+        profile.primary_energy_solve_seconds += phase_seconds;
 
         if (!phys.primary_only && step > 0) {
             phase_start = Clock::now();
@@ -2293,7 +2380,8 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
                                 false,
                                 cache_secondary_source ? &stream_source_path : nullptr,
                                 false,
-                                cache_secondary_source);
+                                cache_secondary_source,
+                                energy_timing);
             profile.energy_seconds += secondsSince(phase_start);
             streamingTransportAngleTransportPairStep(stream_F1_path, stream_f_F1_path,
                                                      half_dt, grid.dt,
@@ -2306,7 +2394,8 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
                                 can_reuse_secondary_source,
                                 cache_secondary_source ? &stream_source_path : nullptr,
                                 cache_secondary_source,
-                                false);
+                                false,
+                                energy_timing);
             profile.energy_seconds += secondsSince(phase_start);
         }
 
