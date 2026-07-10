@@ -251,6 +251,116 @@ __global__ void sineInverseKernel(
     out[gid] = value;
 }
 
+__global__ void separableForwardUKernel(
+    const double* in,
+    double* tmp,
+    const double* sine_u,
+    int Nom,
+    int Nmu,
+    int n_angle,
+    int batch
+) {
+    long long total = static_cast<long long>(batch) * n_angle;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    int mode = static_cast<int>(gid % n_angle);
+    long long bidx = gid / n_angle;
+    int mu = mode % Nom;
+    int v = mode / Nom;
+
+    double sum = 0.0;
+    const long long base = bidx * n_angle + static_cast<long long>(v) * Nom;
+    const double* su = sine_u + static_cast<long long>(mu) * Nom;
+    for (int a = 0; a < Nom; ++a) {
+        sum += in[base + a] * su[a];
+    }
+    tmp[gid] = sum;
+}
+
+__global__ void separableForwardVFactorKernel(
+    const double* tmp_u,
+    double* coeff,
+    const double* sine_v,
+    const double* factor,
+    int Nom,
+    int Nmu,
+    int n_angle,
+    int nyz,
+    int batch
+) {
+    long long total = static_cast<long long>(batch) * n_angle;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    int mode = static_cast<int>(gid % n_angle);
+    long long bidx = gid / n_angle;
+    int mu = mode % Nom;
+    int nu = mode / Nom;
+    int ek = static_cast<int>(bidx / nyz);
+
+    double sum = 0.0;
+    const long long base = bidx * n_angle;
+    const double* sv = sine_v + static_cast<long long>(nu) * Nmu;
+    for (int v = 0; v < Nmu; ++v) {
+        sum += sv[v] * tmp_u[base + static_cast<long long>(v) * Nom + mu];
+    }
+    coeff[gid] = sum * factor[static_cast<long long>(ek) * n_angle + mode];
+}
+
+__global__ void separableInverseVKernel(
+    const double* coeff,
+    double* tmp_v,
+    const double* sine_v,
+    int Nom,
+    int Nmu,
+    int n_angle,
+    int batch
+) {
+    long long total = static_cast<long long>(batch) * n_angle;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    int mode = static_cast<int>(gid % n_angle);
+    long long bidx = gid / n_angle;
+    int mu = mode % Nom;
+    int v = mode / Nom;
+
+    double sum = 0.0;
+    const long long base = bidx * n_angle;
+    for (int nu = 0; nu < Nmu; ++nu) {
+        sum += sine_v[static_cast<long long>(nu) * Nmu + v] *
+               coeff[base + static_cast<long long>(nu) * Nom + mu];
+    }
+    tmp_v[gid] = sum;
+}
+
+__global__ void separableInverseUKernel(
+    const double* tmp_v,
+    double* out,
+    const double* sine_u,
+    int Nom,
+    int Nmu,
+    int n_angle,
+    int batch
+) {
+    long long total = static_cast<long long>(batch) * n_angle;
+    long long gid = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+
+    int angle = static_cast<int>(gid % n_angle);
+    long long bidx = gid / n_angle;
+    int a = angle % Nom;
+    int v = angle / Nom;
+
+    double sum = 0.0;
+    const long long base = bidx * n_angle + static_cast<long long>(v) * Nom;
+    for (int mu = 0; mu < Nom; ++mu) {
+        sum += tmp_v[base + mu] * sine_u[static_cast<long long>(mu) * Nom + a];
+    }
+    out[gid] = sum;
+}
+
 AngleDiffusionSolver::AngleDiffusionSolver(int nmu, int nom, cublasHandle_t handle)
     : Nmu(nmu), Nom(nom), n_angle(nmu * nom), planned_batch(0),
       planned_ng(0), planned_nyz(0),
@@ -369,6 +479,72 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpyAsync(F, d_F_tmp.data(),
                                    static_cast<size_t>(total) * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, stream));
+        return;
+    }
+
+    if (Nom <= 128 && Nmu <= 128) {
+        const size_t total_size = static_cast<size_t>(total);
+        if (d_F_tmp.getSize() < total_size) {
+            d_F_tmp.allocate(total_size);
+        }
+        if (d_sep_tmp1.getSize() < total_size) {
+            d_sep_tmp1.allocate(total_size);
+        }
+        if (d_sep_tmp2.getSize() < total_size) {
+            d_sep_tmp2.allocate(total_size);
+        }
+        if (d_sine_coeff.getSize() < static_cast<size_t>(Ng) * n_angle) {
+            d_sine_coeff.allocate(static_cast<size_t>(Ng) * n_angle);
+        }
+        if (d_diffusion_factor.getSize() < static_cast<size_t>(Ng) * n_angle) {
+            d_diffusion_factor.allocate(static_cast<size_t>(Ng) * n_angle);
+        }
+
+        int block_size = 256;
+        int grid_size = (total + block_size - 1) / block_size;
+        buildDiffusionFactorKernel<<<(Ng * n_angle + block_size - 1) / block_size,
+                                     block_size, 0, stream>>>(
+            d_diffusion_factor.data(), sig_trg,
+            Nom, Nmu, n_angle, Ng, cached_du, cached_dv, dt, density
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        double norm = 4.0 / ((Nom + 1.0) * (Nmu + 1.0));
+        complexToRealKernel<<<(Ng * n_angle + block_size - 1) / block_size,
+                              block_size, 0, stream>>>(
+            d_sine_coeff.data(),
+            d_diffusion_factor.data(),
+            norm,
+            Ng * n_angle
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        separableForwardUKernel<<<grid_size, block_size, 0, stream>>>(
+            F, d_sep_tmp1.data(), d_sine_u.data(), Nom, Nmu, n_angle, batch
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        separableForwardVFactorKernel<<<grid_size, block_size, 0, stream>>>(
+            d_sep_tmp1.data(), d_sep_tmp2.data(), d_sine_v.data(),
+            d_sine_coeff.data(), Nom, Nmu, n_angle, nyz, batch
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        separableInverseVKernel<<<grid_size, block_size, 0, stream>>>(
+            d_sep_tmp2.data(), d_sep_tmp1.data(), d_sine_v.data(),
+            Nom, Nmu, n_angle, batch
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        separableInverseUKernel<<<grid_size, block_size, 0, stream>>>(
+            d_sep_tmp1.data(), d_F_tmp.data(), d_sine_u.data(),
+            Nom, Nmu, n_angle, batch
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cudaMemcpyAsync(F, d_F_tmp.data(),
+                                   total_size * sizeof(double),
                                    cudaMemcpyDeviceToDevice, stream));
         return;
     }

@@ -3,10 +3,11 @@
 ## Highest Priority
 
 - [ ] Optimize angular sine-series/DST implementation.
-  - Current strict Eq. `(21)` path uses direct global-memory sine transforms for
-    `Nmu,Nom <= 32`.
-  - Replace with a faster separable matrix-multiply implementation or a verified
-    batched odd-extension FFT/DST path before scaling to paper `20x20` grids.
+  - Current Eq. `(21)` path uses direct global-memory sine transforms for
+    `Nmu,Nom <= 32`, separable real DST kernels for `Nmu,Nom <= 128`, and an
+    odd-extension FFT fallback above that range.
+  - Further optimize the separable DST path and revisit a library-backed batched
+    DST/FFT path for very large angular grids.
   - Keep the zero-boundary Eq. `(21)` semantics; do not return to periodic FFT.
 
 - [ ] Fix data dependency in `stepPrimary`.
@@ -73,13 +74,14 @@ the model used in the paper.
   - Use the same structure for secondary protons once the source term is available.
 
 - [x] Add MUSCL-style spatial transport.
-  - Current transport uses the Eq. `(22)` limiter and a predictor-corrector CN
+  - Current transport uses the Eq. `(22)` limiter and an explicit predictor-corrector
     depth update.
   - Still needs formal convergence tests against the paper diagnostics.
 
 - [x] Replace periodic angular FFT semantics with zero-boundary sine-series semantics.
   - Current angular diffusion uses the Eq. `(20)`-`(21)` CN eigenvalues and
-    DST-I/sine basis for `Nmu,Nom <= 32`.
+    DST-I/sine basis. Small grids use direct sine sums, medium grids use
+    separable DST kernels, and larger grids fall back to odd-extension FFT.
   - Paper benchmark settings use `20x20` angular grid; current default is `11x11`.
   - Next work is performance and convergence validation, not formula replacement.
 
@@ -99,7 +101,12 @@ the model used in the paper.
 ## Numerical Model Completeness
 
 - [x] Replace simplified energy attenuation with paper-level energy discretization.
-  - Current `energyDgCnKernel` implements the Eq. `(15)` DG/CN subsystem.
+  - Current `energyDgCnPrecomputeKernel` and `energyDgCnSolveFromPrecomputeKernel`
+    implement the Eq. `(15)` DG/CN subsystem as the algebra documented in
+    `results/transport_formula/transport_formula.pdf` equations `(11)`-`(21)`.
+  - The implemented new-value system is a 2x2 block upper-bidiagonal energy
+    system solved by high-to-low energy backward substitution, not a stored
+    scalar tridiagonal matrix.
   - Further work is convergence testing and performance tuning.
 
 - [x] Complete collision integral and source term for Figure 3 IDD validation.
@@ -113,13 +120,13 @@ the model used in the paper.
   - Support water, bone, air, and heterogeneous material maps.
 
 - [ ] Validate paper-level spatial transport.
-  - Current transport uses the Eq. `(22)` MUSCL limiter with a CN
+  - Current transport uses the Eq. `(22)` MUSCL limiter with an explicit
     predictor-corrector update.
   - Verify against convergence tests and Figure 1/Figure 2 style diagnostics.
 
 - [ ] Validate angular discretization at larger grids.
-  - Current strict sine-series path is used for `Nmu,Nom <= 32`; paper tests use
-    `20x20`.
+  - Validate the direct sine, separable DST, and odd-extension FFT branches
+    against each other.
   - Add convergence tests and optimize performance for larger angular grids.
 
 ## Validation
@@ -165,14 +172,17 @@ the model used in the paper.
     batched odd-extension FFT/DST.
   - Keep Eq. `(21)` zero-boundary semantics.
 
-- [ ] Optimize `spatialTransportKernel` after algorithmic fixes.
+- [ ] Optimize spatial transport kernels after algorithmic fixes.
   - Reduce integer division/modulo if possible.
   - Consider layout changes for coalescing.
   - Review FP64 usage and whether FP32/mixed precision is acceptable.
   - Use double buffering to avoid in-place hazards.
 
 - [ ] Optimize energy step.
-  - Use batched tridiagonal solve.
+  - Optimize the current coefficient precompute plus high-to-low energy
+    backward substitution.
+  - Revisit a batched tridiagonal solve only if the straggling term is changed
+    to a fully implicit new-value coupling.
   - Keep energy-major vs angle-major layout under review.
   - Avoid repeated host-device transfers.
 

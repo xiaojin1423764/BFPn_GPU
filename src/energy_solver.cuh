@@ -4,6 +4,16 @@
 
 #include "utils.cuh"
 
+struct EnergyTiming {
+    double copy_in_seconds = 0.0;
+    double legacy_kernel_seconds = 0.0;
+    double precompute_seconds = 0.0;
+    double recurrence_seconds = 0.0;
+    double copy_out_seconds = 0.0;
+    double secondary_source_seconds = 0.0;
+    double secondary_update_seconds = 0.0;
+};
+
 // PCR (Parallel Cyclic Reduction) 三对角求解器
 template<int BLOCK_SIZE>
 class PCRSolver {
@@ -61,19 +71,22 @@ public:
         const double* source_term_f = nullptr,
         bool use_legacy = false,
         bool enable_straggling = false,
-        cudaStream_t stream = 0
+        cudaStream_t stream = 0,
+        EnergyTiming* timing = nullptr
     );
 
     void solveSecondaryFromPrimary(
         double* F_secondary, double* f_secondary,
         const double* F_primary, const double* f_primary,
         const double* ker_e1, const double* ker_e2, const double* ker_v,
+        const int* ker_e_begin, const int* ker_e_end,
         const double* S_s, const double* sigma_c, const double* T_c,
         double dt, double dg, double density,
         int nyz, int NmuNom,
         bool use_legacy = false,
         bool enable_straggling = false,
-        cudaStream_t stream = 0
+        cudaStream_t stream = 0,
+        EnergyTiming* timing = nullptr
     );
     
     // 批量求解

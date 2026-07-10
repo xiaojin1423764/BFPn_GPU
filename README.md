@@ -14,9 +14,11 @@ Implemented at prototype level:
 - CUDA memory wrappers and solver orchestration.
 - Primary and secondary proton arrays.
 - Angular diffusion step using the zero-boundary sine-series/DST-I
-  discretization from Eq. `(20)`-`(21)` for `Nmu,Nom <= 32`.
+  discretization from Eq. `(20)`-`(21)`; small angular grids use direct sine
+  sums, medium grids use separable DST kernels, and larger grids fall back to
+  the odd-extension FFT path.
 - Spatial transport step using the Eq. `(22)` MUSCL limiter with a
-  predictor-corrector Crank-Nicolson depth update.
+  fully explicit predictor-corrector depth update.
 - Eq. `(15)` DG/CN energy step for `psi_g^1` and `psi_g^2`, including stopping
   power, catastrophic loss, and optional straggling terms.
 - Catastrophic secondary source in the full in-memory path using the
@@ -170,6 +172,17 @@ catastrophic secondary source. It is the default for validation work. `legacy`
 keeps the previous stable upwind energy approximation and is useful only for
 quick comparison runs.
 
+The companion derivation in `results/transport_formula/transport_formula.pdf`
+numbers the current energy implementation as equations `(11)`-`(21)`. Those
+formulas are not a separate method: they are the algebra used by
+`energyDgCnPrecomputeKernel` and `energyDgCnSolveFromPrecomputeKernel`.
+The precompute kernel forms the coefficients `D_g`, `A_g`, `B_g`, `C_g`,
+`R_g^(4)`, `C_g^R`, and `H_g`; the solve kernel sweeps from high energy to low
+energy using `hi_delta = P_hat_{g+1} - R_hat_{g+1}`. In matrix language the
+implemented new-value system is a 2x2 block upper-bidiagonal energy system, so
+the code performs backward substitution rather than assembling a scalar
+tridiagonal matrix.
+
 Validated fine-grid development run:
 
 ```bash
@@ -311,9 +324,9 @@ To reproduce Figure 3, the implementation needs the following paper formulas in 
 3. Equations `(11)`-`(14)`: define the second-order DG representation in energy, storing two coefficients per energy group, `psi_g^1` and `psi_g^2`.
 4. Equation `(15)`: evolves the DG energy coefficients with stopping power `S(E)`, straggling `T(E)`, and catastrophic loss `sigma_c,t`. This is the core formula needed for a correct Bragg peak.
 5. Equations `(16)`-`(19)`: split the depth evolution into `L1` spatial transport in `y,z`, `L2` angular diffusion in `u,v`, and `L3/L4` energy slowing-down terms.
-6. Strang splitting with Crank-Nicolson substeps: advances one depth step using energy half step, spatial half step, angular full step, spatial half step, and energy half step.
+6. Strang splitting: advances one depth step using energy half step, spatial half step, angular full step, spatial half step, and energy half step. Energy and angular diffusion use CN-style updates; the current spatial transport implementation is explicit predictor-corrector.
 7. Equations `(20)` and `(21)`: discretize and solve angular diffusion with the zero-boundary sine-series/DST-I method.
-8. Equation `(22)`: updates lateral `y,z` transport with the second-order finite-volume/MUSCL scheme and a CN predictor-corrector depth step.
+8. Equation `(22)`: provides the lateral `y,z` MUSCL finite-volume reconstruction. The current CUDA path uses that MUSCL flux in an explicit predictor-corrector update, not the paper's implicit/CN transport solve.
 9. Dose definition `D(r) = Edep(r) / rho(r)` and equation `(24)`: compute local primary energy deposition; the secondary term is added analogously.
 10. Section 4.2 IDD definition: output `IDD(x) = integral integral D(x,y,z) dy dz`, which is the curve plotted in Figure 3.
 
@@ -348,6 +361,10 @@ Recommended implementation order:
 2. Continue validating the energy model.
    - `--energy-model eq15` implements the current equation `(15)` DG/CN path in
      full in-memory mode.
+   - The PDF derivation in `results/transport_formula/transport_formula.pdf`
+     labels the actual code algebra as equations `(11)`-`(21)` and maps those
+     symbols to the CUDA variables used by `energyDgCnPrecomputeKernel` and
+     `energyDgCnSolveFromPrecomputeKernel`.
    - `--energy-model legacy` keeps the older stable upwind path for comparison.
    - The paper uses a second-order DG discretization in energy with two coefficients per group,
      Crank-Nicolson updates, stopping power `S(E)`, straggling `T(E)`, and catastrophic loss
@@ -362,7 +379,7 @@ Recommended implementation order:
 
 4. Complete transport and secondary validation.
    - The spatial transport kernel now uses the Eq. `(22)` MUSCL limiter and a
-     predictor-corrector CN update.
+     fully explicit predictor-corrector update.
    - The full in-memory secondary source uses energy/angle transition kernels.
    - The out-of-core streaming path uses the same energy/angle transition
      source formula in a GPU chunk kernel, but its backing files are still
@@ -394,18 +411,29 @@ Nsight Compute single-kernel samples:
 
 ```bash
 ncu --target-processes all --set basic \
-  --kernel-name regex:spatialTransportKernel \
+  --kernel-name regex:spatialFluxDivergencePlaneKernel \
   --launch-count 1 \
   --force-overwrite \
   --export ncu_spatial_small \
   ./build/bin/bfp_solver 100 --data data --time 0.4
 
 ncu --target-processes all --set basic \
-  --kernel-name regex:energyDgCnKernel \
+  --kernel-name regex:energyDgCnPrecomputeKernel \
   --launch-count 1 \
   --force-overwrite \
   --export ncu_energy_small \
   ./build/bin/bfp_solver 100 --data data --time 0.4
+
+ncu --target-processes all --set basic \
+  --kernel-name regex:separableForwardVFactorKernel \
+  --launch-count 1 \
+  --force-overwrite \
+  --export ncu_angle_sep_small \
+  ./build/bin/bfp_solver 100 --data data --time 0.4 --nmu 64 --nom 64
 ```
 
-Current profiling conclusion: the main performance bottleneck is excessive launch count in angular diffusion. The code performs many tiny `11x11` FFTs one slice at a time. Replace this with batched cuFFT before optimizing individual kernels.
+Current profiling conclusion: for larger angular grids, the optimized angle path
+is the separable real DST branch, which avoids the previous very slow
+odd-extension FFT fallback for `Nmu,Nom <= 128`. Further angle work should focus
+on improving the separable DST kernels or replacing the large-grid fallback with
+a verified batched DST/FFT implementation.

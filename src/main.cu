@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
     bool no_transport = false;
     bool no_angle = false;
     bool no_spatial_clipping = false;
+    bool profile_steps = false;
     int streaming_lane_chunk = 262144;
     int streaming_energy_chunk = 128;
     int idd_stride = 1;
@@ -152,6 +153,8 @@ int main(int argc, char** argv) {
             no_angle = true;
         } else if (arg == "--no-spatial-clipping") {
             no_spatial_clipping = true;
+        } else if (arg == "--profile-steps") {
+            profile_steps = true;
         } else if (arg == "--sigma-yz" && i + 1 < argc) {
             sigma_yz = std::stod(argv[++i]);
         } else if (arg == "--lane-chunk" && i + 1 < argc) {
@@ -193,6 +196,7 @@ int main(int argc, char** argv) {
                       << "  --no-transport   Skip the spatial transport subsystem\n"
                       << "  --no-angle       Skip the angular diffusion subsystem\n"
                       << "  --no-spatial-clipping Disable positivity clipping in spatial transport\n"
+                      << "  --profile-steps  Print energy/transport/angle step timing summary\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
                       << "  --energy-chunk <n> Streaming transport/angle energy chunk (default: 128)\n"
@@ -262,6 +266,7 @@ int main(int argc, char** argv) {
     phys.no_transport = no_transport;
     phys.no_angle = no_angle;
     phys.no_spatial_clipping = no_spatial_clipping;
+    phys.profile_steps = profile_steps;
     phys.streaming_lane_chunk = streaming_lane_chunk;
     phys.streaming_energy_chunk = streaming_energy_chunk;
     phys.streaming_dir = streaming_dir;

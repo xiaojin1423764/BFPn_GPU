@@ -33,6 +33,8 @@ private:
     DeviceArray<double> d_sine_u;
     DeviceArray<double> d_sine_v;
     DeviceArray<double> d_dst_coeff;
+    DeviceArray<double> d_sep_tmp1;
+    DeviceArray<double> d_sep_tmp2;
     
     // cuBLAS句柄
     cublasHandle_t cublas_handle;

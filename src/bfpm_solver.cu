@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <limits>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -38,6 +39,96 @@ size_t alignedLaneChunk(size_t requested, size_t n_angle) {
         return std::max<size_t>(1, requested);
     }
     return std::max(n_angle, (std::max<size_t>(1, requested) / n_angle) * n_angle);
+}
+
+using Clock = std::chrono::steady_clock;
+
+double secondsSince(Clock::time_point start) {
+    return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+void readStoreFd(int fd, const std::string& path, size_t element_offset,
+                 double* dst, size_t count) {
+    char* out = reinterpret_cast<char*>(dst);
+    size_t bytes = count * sizeof(double);
+    off_t offset = static_cast<off_t>(element_offset * sizeof(double));
+    size_t done = 0;
+    while (done < bytes) {
+        ssize_t got = pread(fd, out + done, bytes - done, offset + static_cast<off_t>(done));
+        if (got <= 0) {
+            throw std::runtime_error("Cannot read streaming file chunk: " + path);
+        }
+        done += static_cast<size_t>(got);
+    }
+}
+
+void writeStoreFd(int fd, const std::string& path, size_t element_offset,
+                  const double* src, size_t count) {
+    const char* in = reinterpret_cast<const char*>(src);
+    size_t bytes = count * sizeof(double);
+    off_t offset = static_cast<off_t>(element_offset * sizeof(double));
+    size_t done = 0;
+    while (done < bytes) {
+        ssize_t put = pwrite(fd, in + done, bytes - done, offset + static_cast<off_t>(done));
+        if (put <= 0) {
+            throw std::runtime_error("Cannot write streaming file chunk: " + path);
+        }
+        done += static_cast<size_t>(put);
+    }
+}
+
+void printStepProfile(const StepProfile& profile) {
+    if (profile.steps == 0) {
+        return;
+    }
+    auto pct = [&](double seconds) {
+        return profile.total_seconds > 0.0 ? 100.0 * seconds / profile.total_seconds : 0.0;
+    };
+    std::cout << std::fixed << std::setprecision(6)
+              << "Step timing summary (" << profile.steps << " steps):\n"
+              << "  total       " << profile.total_seconds << " s"
+              << ", per step " << profile.total_seconds / profile.steps << " s\n"
+              << "  energy      " << profile.energy_seconds << " s"
+              << ", per step " << profile.energy_seconds / profile.steps << " s"
+              << ", " << pct(profile.energy_seconds) << "%\n"
+              << "  transport   " << profile.transport_seconds << " s"
+              << ", per step " << profile.transport_seconds / profile.steps << " s"
+              << ", " << pct(profile.transport_seconds) << "%\n"
+              << "  angle       " << profile.angle_seconds << " s"
+              << ", per step " << profile.angle_seconds / profile.steps << " s"
+              << ", " << pct(profile.angle_seconds) << "%\n"
+              << "  diagnostics " << profile.diagnostics_seconds << " s"
+              << ", per step " << profile.diagnostics_seconds / profile.steps << " s"
+              << ", " << pct(profile.diagnostics_seconds) << "%"
+              << std::endl;
+    const EnergyTiming& e = profile.energy_timing;
+    const double detailed = e.copy_in_seconds + e.legacy_kernel_seconds
+                          + e.precompute_seconds + e.recurrence_seconds
+                          + e.copy_out_seconds + e.secondary_source_seconds;
+    if (detailed > 0.0) {
+        auto epct = [&](double seconds) {
+            return profile.energy_seconds > 0.0 ? 100.0 * seconds / profile.energy_seconds : 0.0;
+        };
+        std::cout << "Energy detail:\n"
+                  << "  primary solve       " << profile.primary_energy_solve_seconds << " s"
+                  << ", " << epct(profile.primary_energy_solve_seconds) << "% of energy\n"
+                  << "  secondary source    " << e.secondary_source_seconds << " s"
+                  << ", " << epct(e.secondary_source_seconds) << "% of energy\n"
+                  << "  secondary update    " << e.secondary_update_seconds << " s"
+                  << ", " << epct(e.secondary_update_seconds) << "% of energy\n"
+                  << "  copy in             " << e.copy_in_seconds << " s"
+                  << ", " << epct(e.copy_in_seconds) << "% of energy\n"
+                  << "  Eq15 precompute     " << e.precompute_seconds << " s"
+                  << ", " << epct(e.precompute_seconds) << "% of energy\n"
+                  << "  energy recurrence   " << e.recurrence_seconds << " s"
+                  << ", " << epct(e.recurrence_seconds) << "% of energy\n"
+                  << "  copy out            " << e.copy_out_seconds << " s"
+                  << ", " << epct(e.copy_out_seconds) << "% of energy\n";
+        if (e.legacy_kernel_seconds > 0.0) {
+            std::cout << "  legacy kernel       " << e.legacy_kernel_seconds << " s"
+                      << ", " << epct(e.legacy_kernel_seconds) << "% of energy\n";
+        }
+    }
 }
 
 struct ElementFraction {
@@ -819,12 +910,14 @@ void BFPnSolver::allocateMemory() {
 
         d_stream_F.allocate(stream_size);
         d_stream_f_F.allocate(stream_size);
-        d_stream_F1.allocate(stream_size);
-        d_stream_f_F1.allocate(stream_size);
-        d_stream_primary_F.allocate(stream_size);
-        d_stream_primary_f_F.allocate(stream_size);
         d_stream_old_F.allocate(stream_size);
         d_stream_old_f_F.allocate(stream_size);
+        if (!phys.primary_only) {
+            d_stream_F1.allocate(stream_size);
+            d_stream_f_F1.allocate(stream_size);
+            d_stream_primary_F.allocate(stream_size);
+            d_stream_primary_f_F.allocate(stream_size);
+        }
         d_energy_moments.allocate(static_cast<size_t>(grid.Ng) * 2);
 
         constexpr int reduction_block_size = 256;
@@ -931,7 +1024,9 @@ void BFPnSolver::preflightMemory() const {
         const size_t max_chunk_cells = std::max(energy_chunk_cells, lane_chunk_cells);
         const size_t stream_array = checkedMul(max_chunk_cells, sizeof(double), "stream chunk bytes");
 
-        estimated += checkedMul(stream_array, 8, "stream F/f/F1/f1/source chunk buffers");
+        estimated += checkedMul(stream_array,
+                                phys.primary_only ? 4 : 8,
+                                "stream F/f/F1/f1/source chunk buffers");
         estimated += checkedMul((max_chunk_cells + 511) / 512, sizeof(double), "stream reduction buffer");
         estimated += checkedMul(static_cast<size_t>(grid.Ng), sizeof(double), "physics arrays") * 5;
         estimated += checkedMul(checkedMul(static_cast<size_t>(grid.Ng), static_cast<size_t>(grid.Ng), "stream energy kernels"),
@@ -1215,6 +1310,27 @@ void BFPnSolver::initializeKernels() {
     d_ker_e1.copyFromHost(h_ker_e1.data(), grid.Ng * grid.Ng);
     d_ker_e2.copyFromHost(h_ker_e2.data(), grid.Ng * grid.Ng);
 
+    std::vector<int> h_ker_e_begin(grid.Ng, grid.Ng);
+    std::vector<int> h_ker_e_end(grid.Ng, 0);
+    for (int row = 0; row < grid.Ng; ++row) {
+        for (int col = 0; col < grid.Ng; ++col) {
+            const double e1 = h_ker_e1[row * grid.Ng + col];
+            const double e2 = h_ker_e2[row * grid.Ng + col];
+            if (e1 != 0.0 || e2 != 0.0) {
+                h_ker_e_begin[row] = std::min(h_ker_e_begin[row], col);
+                h_ker_e_end[row] = std::max(h_ker_e_end[row], col + 1);
+            }
+        }
+        if (h_ker_e_begin[row] == grid.Ng) {
+            h_ker_e_begin[row] = 0;
+            h_ker_e_end[row] = 0;
+        }
+    }
+    d_ker_e_begin.allocate(grid.Ng);
+    d_ker_e_end.allocate(grid.Ng);
+    d_ker_e_begin.copyFromHost(h_ker_e_begin.data(), grid.Ng);
+    d_ker_e_end.copyFromHost(h_ker_e_end.data(), grid.Ng);
+
     const int n_angle = grid.Nmu * grid.Nom;
     std::vector<double> h_omega(n_angle * 2);
     d_Omend.copyToHost(h_omega.data(), n_angle * 2);
@@ -1491,17 +1607,7 @@ void BFPnSolver::readStore(const std::string& path,
                            double* dst,
                            size_t count) const {
     int fd = getStoreFd(path);
-    char* out = reinterpret_cast<char*>(dst);
-    size_t bytes = count * sizeof(double);
-    off_t offset = static_cast<off_t>(element_offset * sizeof(double));
-    size_t done = 0;
-    while (done < bytes) {
-        ssize_t got = pread(fd, out + done, bytes - done, offset + static_cast<off_t>(done));
-        if (got <= 0) {
-            throw std::runtime_error("Cannot read streaming file chunk: " + path);
-        }
-        done += static_cast<size_t>(got);
-    }
+    readStoreFd(fd, path, element_offset, dst, count);
 }
 
 void BFPnSolver::writeStore(const std::string& path,
@@ -1509,17 +1615,7 @@ void BFPnSolver::writeStore(const std::string& path,
                             const double* src,
                             size_t count) const {
     int fd = getStoreFd(path);
-    const char* in = reinterpret_cast<const char*>(src);
-    size_t bytes = count * sizeof(double);
-    off_t offset = static_cast<off_t>(element_offset * sizeof(double));
-    size_t done = 0;
-    while (done < bytes) {
-        ssize_t put = pwrite(fd, in + done, bytes - done, offset + static_cast<off_t>(done));
-        if (put <= 0) {
-            throw std::runtime_error("Cannot write streaming file chunk: " + path);
-        }
-        done += static_cast<size_t>(put);
-    }
+    writeStoreFd(fd, path, element_offset, src, count);
 }
 
 void BFPnSolver::solve(double tFinal) {
@@ -1536,6 +1632,7 @@ void BFPnSolver::solve(double tFinal) {
     int step = 0;
     int max_steps = static_cast<int>(std::ceil(tFinal / grid.dt - 1e-12));
     int ping = 0, pong = 1;
+    StepProfile profile;
 
     std::cout << "Starting BFPn solver..." << std::endl;
     std::cout << "Grid: " << grid.Nx << "x" << grid.Ny << "x" << grid.Nz
@@ -1545,10 +1642,15 @@ void BFPnSolver::solve(double tFinal) {
     }
 
     while (step < max_steps) {
+        auto step_start = Clock::now();
         if (phys.lite_memory) {
+            auto phase_start = Clock::now();
             stepLitePrimary();
+            profile.energy_seconds += secondsSince(phase_start);
 
+            phase_start = Clock::now();
             double idd = computeIntegratedDepthDoseLite();
+            profile.diagnostics_seconds += secondsSince(phase_start);
             idd_history.push_back(idd);
             proxy_history.push_back(0.0);
 
@@ -1559,21 +1661,24 @@ void BFPnSolver::solve(double tFinal) {
                 std::cout << "Step " << step << ", t = " << t << "/" << tFinal
                           << ", IDD = " << idd << std::endl;
             }
+            profile.total_seconds += secondsSince(step_start);
+            profile.steps++;
             continue;
         }
 
         if (phys.energy_only) {
-            stepPrimaryEnergyOnly();
+            stepPrimaryEnergyOnly(phys.profile_steps ? &profile : nullptr);
         } else {
-            stepPrimary(ping, t);
+            stepPrimary(ping, t, phys.profile_steps ? &profile : nullptr);
         }
 
         // Secondary质子: 演化 (包含源项)
         if (!phys.energy_only && !phys.primary_only && step > 0) {
-            stepSecondary(ping, pong, t);
+            stepSecondary(ping, pong, t, phys.profile_steps ? &profile : nullptr);
             std::swap(ping, pong);
         }
 
+        auto diagnostics_start = Clock::now();
         double idd = computeIntegratedDepthDose();
         double proxy = computeScalarDoseProxy();
         idd_history.push_back(idd);
@@ -1584,9 +1689,12 @@ void BFPnSolver::solve(double tFinal) {
                                          moments.begin(),
                                          moments.end());
         }
+        profile.diagnostics_seconds += secondsSince(diagnostics_start);
 
         t += grid.dt;
         step++;
+        profile.total_seconds += secondsSince(step_start);
+        profile.steps++;
 
         for (size_t i = 0; i < phys.spot_depths.size(); ++i) {
             if (!spot_saved[i] && t + 0.5 * grid.dt >= phys.spot_depths[i]) {
@@ -1608,6 +1716,9 @@ void BFPnSolver::solve(double tFinal) {
     }
     std::cout << "Solver completed. Paper-style IDD saved to idd_output.txt" << std::endl;
     std::cout << "Diagnostic scalar proxy saved to dose_output.txt" << std::endl;
+    if (phys.profile_steps) {
+        printStepProfile(profile);
+    }
 }
 
 void BFPnSolver::streamingEnergyStep(const std::string& F_path,
@@ -2033,6 +2144,7 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
     const bool can_reuse_secondary_source = effective_lane_chunk >= n_per_E;
     const bool cache_secondary_source = !can_reuse_secondary_source &&
                                         !stream_source_path.empty();
+    StepProfile profile;
 
     std::cout << "Starting BFPn solver..." << std::endl;
     std::cout << "Grid: " << grid.Nx << "x" << grid.Ny << "x" << grid.Nz
@@ -2046,17 +2158,29 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
               << std::endl;
 
     for (int step = 0; step < max_steps; ++step) {
+        auto step_start = Clock::now();
         bool compute_idd = ((step + 1) % idd_stride == 0) || (step + 1 == max_steps);
         double idd = 0.0;
 
+        auto phase_start = Clock::now();
         streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt);
+        profile.energy_seconds += secondsSince(phase_start);
+        phase_start = Clock::now();
         streamingTransportPairStep(stream_F_path, stream_f_F_path, half_dt);
+        profile.transport_seconds += secondsSince(phase_start);
+        phase_start = Clock::now();
         streamingAnglePairStep(stream_F_path, stream_f_F_path, grid.dt);
+        profile.angle_seconds += secondsSince(phase_start);
+        phase_start = Clock::now();
         streamingTransportPairStep(stream_F_path, stream_f_F_path, half_dt);
+        profile.transport_seconds += secondsSince(phase_start);
+        phase_start = Clock::now();
         streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt,
                             compute_idd ? &idd : nullptr);
+        profile.energy_seconds += secondsSince(phase_start);
 
         if (!phys.primary_only && step > 0) {
+            phase_start = Clock::now();
             streamingEnergyStep(stream_F1_path, stream_f_F1_path,
                                 &stream_F_path, &stream_f_F_path,
                                 true, half_dt,
@@ -2065,9 +2189,17 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
                                 cache_secondary_source ? &stream_source_path : nullptr,
                                 false,
                                 cache_secondary_source);
+            profile.energy_seconds += secondsSince(phase_start);
+            phase_start = Clock::now();
             streamingTransportPairStep(stream_F1_path, stream_f_F1_path, half_dt);
+            profile.transport_seconds += secondsSince(phase_start);
+            phase_start = Clock::now();
             streamingAnglePairStep(stream_F1_path, stream_f_F1_path, grid.dt);
+            profile.angle_seconds += secondsSince(phase_start);
+            phase_start = Clock::now();
             streamingTransportPairStep(stream_F1_path, stream_f_F1_path, half_dt);
+            profile.transport_seconds += secondsSince(phase_start);
+            phase_start = Clock::now();
             streamingEnergyStep(stream_F1_path, stream_f_F1_path,
                                 &stream_F_path, &stream_f_F_path,
                                 true, half_dt,
@@ -2076,13 +2208,18 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
                                 cache_secondary_source ? &stream_source_path : nullptr,
                                 cache_secondary_source,
                                 false);
+            profile.energy_seconds += secondsSince(phase_start);
         }
 
         double t = (step + 1) * grid.dt;
+        auto diagnostics_start = Clock::now();
         if (compute_idd) {
             idd_history.emplace_back(t, idd);
             proxy_history.emplace_back(t, 0.0);
         }
+        profile.diagnostics_seconds += secondsSince(diagnostics_start);
+        profile.total_seconds += secondsSince(step_start);
+        profile.steps++;
 
         for (size_t i = 0; i < phys.spot_depths.size(); ++i) {
             if (!spot_saved[i] && t + 0.5 * grid.dt >= phys.spot_depths[i]) {
@@ -2104,21 +2241,32 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
     saveDepthResults(proxy_history, "dose_output.txt");
     std::cout << "Solver completed. Paper-style IDD saved to idd_output.txt" << std::endl;
     std::cout << "Diagnostic scalar proxy saved to dose_output.txt" << std::endl;
+    if (phys.profile_steps) {
+        printStepProfile(profile);
+    }
 }
 
-void BFPnSolver::stepPrimary(int ping, double t) {
+void BFPnSolver::stepPrimary(int ping, double t, StepProfile* profile) {
     const double half_dt = 0.5 * grid.dt;
 
+    auto phase_start = Clock::now();
     energy_solver->solve(d_F.data(), d_f_F.data(),
                         d_F.data(), d_f_F.data(),
                         d_S_s.data(), d_sigma_c.data(), d_T_c.data(),
                         half_dt, grid.dg, phys.energy_density,
                         (grid.Ny+1)*(grid.Nz+1), grid.Nmu*grid.Nom,
                         false, nullptr, nullptr,
-                        phys.legacy_energy, phys.eq15_straggling, stream_primary[0]);
+                        phys.legacy_energy, phys.eq15_straggling, stream_primary[0],
+                        profile ? &profile->energy_timing : nullptr);
     CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    if (profile) {
+        double elapsed = secondsSince(phase_start);
+        profile->energy_seconds += elapsed;
+        profile->primary_energy_solve_seconds += elapsed;
+    }
 
     if (!phys.no_transport) {
+        phase_start = Clock::now();
         transport_solver->solveEq18(d_F.data(), d_Omend.data(),
                                     grid.Ng, grid.Nmu*grid.Nom, half_dt,
                                     stream_primary[0], phys.no_spatial_clipping);
@@ -2127,9 +2275,11 @@ void BFPnSolver::stepPrimary(int ping, double t) {
                                     grid.Ng, grid.Nmu*grid.Nom, half_dt,
                                     stream_primary[0], true);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        if (profile) profile->transport_seconds += secondsSince(phase_start);
     }
 
     if (!phys.no_angle) {
+        phase_start = Clock::now();
         angle_solver->solveEq19(d_F.data(), d_sig_trg.data(),
                                 (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
                                 phys.density, stream_primary[0]);
@@ -2138,9 +2288,11 @@ void BFPnSolver::stepPrimary(int ping, double t) {
                                 (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
                                 phys.density, stream_primary[0]);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        if (profile) profile->angle_seconds += secondsSince(phase_start);
     }
 
     if (!phys.no_transport) {
+        phase_start = Clock::now();
         transport_solver->solveEq18(d_F.data(), d_Omend.data(),
                                     grid.Ng, grid.Nmu*grid.Nom, half_dt,
                                     stream_primary[0], phys.no_spatial_clipping);
@@ -2149,21 +2301,30 @@ void BFPnSolver::stepPrimary(int ping, double t) {
                                     grid.Ng, grid.Nmu*grid.Nom, half_dt,
                                     stream_primary[0], true);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        if (profile) profile->transport_seconds += secondsSince(phase_start);
     }
 
+    phase_start = Clock::now();
     energy_solver->solve(d_F.data(), d_f_F.data(),
                         d_F.data(), d_f_F.data(),
                         d_S_s.data(), d_sigma_c.data(), d_T_c.data(),
                         half_dt, grid.dg, phys.energy_density,
                         (grid.Ny+1)*(grid.Nz+1), grid.Nmu*grid.Nom,
                         false, nullptr, nullptr,
-                        phys.legacy_energy, phys.eq15_straggling, stream_primary[0]);
+                        phys.legacy_energy, phys.eq15_straggling, stream_primary[0],
+                        profile ? &profile->energy_timing : nullptr);
     CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+    if (profile) {
+        double elapsed = secondsSince(phase_start);
+        profile->energy_seconds += elapsed;
+        profile->primary_energy_solve_seconds += elapsed;
+    }
 }
 
-void BFPnSolver::stepPrimaryEnergyOnly() {
+void BFPnSolver::stepPrimaryEnergyOnly(StepProfile* profile) {
     const double half_dt = 0.5 * grid.dt;
     for (int pass = 0; pass < 2; ++pass) {
+        auto phase_start = Clock::now();
         energy_solver->solve(d_F.data(), d_f_F.data(),
                             d_F.data(), d_f_F.data(),
                             d_S_s.data(), d_sigma_c.data(), d_T_c.data(),
@@ -2171,31 +2332,44 @@ void BFPnSolver::stepPrimaryEnergyOnly() {
                             (grid.Ny+1)*(grid.Nz+1), grid.Nmu*grid.Nom,
                             false, nullptr, nullptr,
                             phys.legacy_energy, phys.eq15_straggling,
-                            stream_primary[0]);
+                            stream_primary[0],
+                            profile ? &profile->energy_timing : nullptr);
         CUDA_CHECK(cudaStreamSynchronize(stream_primary[0]));
+        if (profile) {
+            double elapsed = secondsSince(phase_start);
+            profile->energy_seconds += elapsed;
+            profile->primary_energy_solve_seconds += elapsed;
+        }
     }
 }
 
-void BFPnSolver::stepSecondary(int ping, int pong, double t) {
+void BFPnSolver::stepSecondary(int ping, int pong, double t, StepProfile* profile) {
     const double half_dt = 0.5 * grid.dt;
 
+    auto phase_start = Clock::now();
     energy_solver->solveSecondaryFromPrimary(d_F1.data(), d_f_F1.data(),
                         d_F.data(), d_f_F.data(),
                         d_ker_e1.data(), d_ker_e2.data(), d_ker_v.data(),
+                        d_ker_e_begin.data(), d_ker_e_end.data(),
                         d_S_s.data(), d_sigma_c.data(), d_T_c.data(),
                         half_dt, grid.dg, phys.energy_density,
                         (grid.Ny+1)*(grid.Nz+1), grid.Nmu*grid.Nom,
                         phys.legacy_energy, phys.eq15_straggling,
-                        stream_secondary);
+                        stream_secondary,
+                        profile ? &profile->energy_timing : nullptr);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+    if (profile) profile->energy_seconds += secondsSince(phase_start);
 
+    phase_start = Clock::now();
     transport_solver->solveEq18(d_F1.data(), d_Omend.data(),
                                 grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
     transport_solver->solveEq18(d_f_F1.data(), d_Omend.data(),
                                 grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary, true);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+    if (profile) profile->transport_seconds += secondsSince(phase_start);
 
+    phase_start = Clock::now();
     angle_solver->solveEq19(d_F1.data(), d_sig_trg.data(),
                             (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
                             phys.density, stream_secondary);
@@ -2204,23 +2378,30 @@ void BFPnSolver::stepSecondary(int ping, int pong, double t) {
                             (grid.Ny+1)*(grid.Nz+1), grid.Ng, grid.dt,
                             phys.density, stream_secondary);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+    if (profile) profile->angle_seconds += secondsSince(phase_start);
 
+    phase_start = Clock::now();
     transport_solver->solveEq18(d_F1.data(), d_Omend.data(),
                                 grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
     transport_solver->solveEq18(d_f_F1.data(), d_Omend.data(),
                                 grid.Ng, grid.Nmu*grid.Nom, half_dt, stream_secondary, true);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+    if (profile) profile->transport_seconds += secondsSince(phase_start);
 
+    phase_start = Clock::now();
     energy_solver->solveSecondaryFromPrimary(d_F1.data(), d_f_F1.data(),
                         d_F.data(), d_f_F.data(),
                         d_ker_e1.data(), d_ker_e2.data(), d_ker_v.data(),
+                        d_ker_e_begin.data(), d_ker_e_end.data(),
                         d_S_s.data(), d_sigma_c.data(), d_T_c.data(),
                         half_dt, grid.dg, phys.energy_density,
                         (grid.Ny+1)*(grid.Nz+1), grid.Nmu*grid.Nom,
                         phys.legacy_energy, phys.eq15_straggling,
-                        stream_secondary);
+                        stream_secondary,
+                        profile ? &profile->energy_timing : nullptr);
     CUDA_CHECK(cudaStreamSynchronize(stream_secondary));
+    if (profile) profile->energy_seconds += secondsSince(phase_start);
 }
 
 void BFPnSolver::stepLitePrimary() {

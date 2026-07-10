@@ -48,30 +48,22 @@ __device__ double load_clamped(
     return F[idx];
 }
 
-__global__ void spatialFluxDivergencePlaneKernel(
+__device__ double spatial_flux_divergence_value(
     const double* F_in,
-    double* flux_div,
     const double* Omend,
-    int Ny, int Nz,
-    int Ng, int NmuNom,
-    double dy, double dz
+    int ek,
+    int ang,
+    int i,
+    int j,
+    int Ny,
+    int Nz,
+    int NmuNom,
+    double dy,
+    double dz
 ) {
     int Ny1 = Ny + 1;
-    int Nz1 = Nz + 1;
-    long long nyz = static_cast<long long>(Ny1) * Nz1;
-    long long yz_blocks = (nyz + blockDim.x - 1) / blockDim.x;
-
-    long long flat_block = static_cast<long long>(blockIdx.x);
-    long long plane = flat_block / yz_blocks;
-    long long yz_block = flat_block - plane * yz_blocks;
-    if (plane >= static_cast<long long>(Ng) * NmuNom) return;
-    int ek = static_cast<int>(plane / NmuNom);
-    int ang = static_cast<int>(plane - static_cast<long long>(ek) * NmuNom);
-    long long s = yz_block * blockDim.x + threadIdx.x;
-    if (s >= nyz) return;
-
-    int j = static_cast<int>(s / Ny1);
-    int i = static_cast<int>(s - static_cast<long long>(j) * Ny1);
+    long long nyz = static_cast<long long>(Ny1) * (Nz + 1);
+    long long s = static_cast<long long>(j) * Ny1 + i;
     long long base = (static_cast<long long>(ek) * nyz + s) * NmuNom + ang;
 
     double omega_y = Omend[2 * ang + 0];
@@ -115,8 +107,38 @@ __global__ void spatialFluxDivergencePlaneKernel(
         right_flux_z = omega_z * (zp1 - 0.5 * slope_z_p1);
     }
 
-    flux_div[base] = (right_flux_y - left_flux_y) / dy +
-                     (right_flux_z - left_flux_z) / dz;
+    return (right_flux_y - left_flux_y) / dy +
+           (right_flux_z - left_flux_z) / dz;
+}
+
+__global__ void spatialFluxDivergencePlaneKernel(
+    const double* F_in,
+    double* flux_div,
+    const double* Omend,
+    int Ny, int Nz,
+    int Ng, int NmuNom,
+    double dy, double dz
+) {
+    int Ny1 = Ny + 1;
+    int Nz1 = Nz + 1;
+    long long nyz = static_cast<long long>(Ny1) * Nz1;
+    long long yz_blocks = (nyz + blockDim.x - 1) / blockDim.x;
+
+    long long flat_block = static_cast<long long>(blockIdx.x);
+    long long plane = flat_block / yz_blocks;
+    long long yz_block = flat_block - plane * yz_blocks;
+    if (plane >= static_cast<long long>(Ng) * NmuNom) return;
+    int ek = static_cast<int>(plane / NmuNom);
+    int ang = static_cast<int>(plane - static_cast<long long>(ek) * NmuNom);
+    long long s = yz_block * blockDim.x + threadIdx.x;
+    if (s >= nyz) return;
+
+    int j = static_cast<int>(s / Ny1);
+    int i = static_cast<int>(s - static_cast<long long>(j) * Ny1);
+    long long base = (static_cast<long long>(ek) * nyz + s) * NmuNom + ang;
+    flux_div[base] = spatial_flux_divergence_value(
+        F_in, Omend, ek, ang, i, j, Ny, Nz, NmuNom, dy, dz
+    );
 }
 
 __global__ void spatialPredictorKernel(
@@ -249,7 +271,6 @@ void SpatialTransportSolver::solveEq18(double* F, const double* Omend,
     );
     CUDA_CHECK(cudaGetLastError());
     
-    // 将更新结果写回 F
     CUDA_CHECK(cudaMemcpyAsync(
         F,
         d_F_tmp.data(),

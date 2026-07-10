@@ -4,6 +4,40 @@
 #include "../include/config.hpp"
 #include <algorithm>
 
+namespace {
+class ScopedCudaEventTimer {
+public:
+    ScopedCudaEventTimer(cudaStream_t stream_, double* seconds_)
+        : stream(stream_), seconds(seconds_), active(seconds_ != nullptr) {
+        if (!active) return;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventRecord(start, stream));
+    }
+
+    ~ScopedCudaEventTimer() {
+        if (!active) return;
+        CUDA_CHECK(cudaEventRecord(stop, stream));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float milliseconds = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+        *seconds += static_cast<double>(milliseconds) * 1e-3;
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+    }
+
+    ScopedCudaEventTimer(const ScopedCudaEventTimer&) = delete;
+    ScopedCudaEventTimer& operator=(const ScopedCudaEventTimer&) = delete;
+
+private:
+    cudaStream_t stream;
+    double* seconds;
+    bool active;
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+};
+}
+
 __global__ void energyDgCnKernel(
     const double* F_old,
     const double* f_old,
@@ -254,10 +288,11 @@ __global__ void secondarySourceFromPrimaryKernel(
     const double* F_primary,
     const double* f_primary,
     double* source_F,
-    double* source_f,
     const double* ker_e1,
     const double* ker_e2,
     const double* ker_v,
+    const int* ker_e_begin,
+    const int* ker_e_end,
     int Ng,
     int nyz,
     int NmuNom,
@@ -274,7 +309,9 @@ __global__ void secondarySourceFromPrimaryKernel(
 
     double q1 = 0.0;
     double q2 = 0.0;
-    for (int src_e = 0; src_e < Ng; ++src_e) {
+    const int src_begin = ker_e_begin ? max(0, ker_e_begin[ek]) : 0;
+    const int src_end = ker_e_end ? min(Ng, ker_e_end[ek]) : Ng;
+    for (int src_e = src_begin; src_e < src_end; ++src_e) {
         const double e1 = ker_e1[static_cast<long long>(ek) * Ng + src_e];
         const double e2 = ker_e2[static_cast<long long>(ek) * Ng + src_e];
         if (e1 == 0.0 && e2 == 0.0) continue;
@@ -293,7 +330,6 @@ __global__ void secondarySourceFromPrimaryKernel(
     }
 
     source_F[gid] = dg * (q1 + q2 / 3.0);
-    source_f[gid] = 0.0;
 }
 
 // PCR求解核函数（当前未在简化版本中使用，保留以便后续扩展）
@@ -415,96 +451,72 @@ void EnergyDepositionSolver::solve(
     const double* source_term_f,
     bool use_legacy,
     bool enable_straggling,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    EnergyTiming* timing) {
     
     int Ng = n_equations;
     long long n_per_E = static_cast<long long>(nyz) * NmuNom;
     long long total = static_cast<long long>(Ng) * n_per_E;
 
-    if (d_F_old.getSize() < static_cast<size_t>(total)) {
-        d_F_old.allocate(static_cast<size_t>(total));
-        d_f_old.allocate(static_cast<size_t>(total));
+    if (d_F_new.getSize() < static_cast<size_t>(total)) {
         d_F_new.allocate(static_cast<size_t>(total));
         d_f_new.allocate(static_cast<size_t>(total));
-        d_F_from_f.allocate(static_cast<size_t>(total));
-        d_F_from_hi.allocate(static_cast<size_t>(total));
-        d_rhs4.allocate(static_cast<size_t>(total));
-        d_rhs_high_coeff.allocate(static_cast<size_t>(total));
-        d_coe.allocate(static_cast<size_t>(total));
     }
-    if (d_rhs_buffer.getSize() < static_cast<size_t>(total)) {
-        d_rhs_buffer.allocate(static_cast<size_t>(total));
-    }
-
-    CUDA_CHECK(cudaMemcpyAsync(d_F_old.data(), F,
-                               static_cast<size_t>(total) * sizeof(double),
-                               cudaMemcpyDeviceToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_f_old.data(), f_F,
-                               static_cast<size_t>(total) * sizeof(double),
-                               cudaMemcpyDeviceToDevice, stream));
 
     int block_size = 256;
     int grid_size  = static_cast<int>((n_per_E + block_size - 1) / block_size);
 
     if (use_legacy) {
-        energyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
-            d_F_old.data(), d_f_old.data(),
-            d_F_new.data(), d_f_new.data(),
-            S_s, sigma_c, T_c,
-            Ng, nyz, NmuNom,
-            dt, dg, density,
-            is_secondary, source_term, source_term_f, use_legacy, enable_straggling
-        );
-        CUDA_CHECK(cudaGetLastError());
+        {
+            ScopedCudaEventTimer timer(stream, timing ? &timing->legacy_kernel_seconds : nullptr);
+            energyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
+                F, f_F,
+                d_F_new.data(), d_f_new.data(),
+                S_s, sigma_c, T_c,
+                Ng, nyz, NmuNom,
+                dt, dg, density,
+                is_secondary, source_term, source_term_f, use_legacy, enable_straggling
+            );
+            CUDA_CHECK(cudaGetLastError());
+        }
     } else {
-        int total_grid = static_cast<int>((total + block_size - 1) / block_size);
-        energyDgCnPrecomputeKernel<<<total_grid, block_size, 0, stream>>>(
-            d_F_old.data(), d_f_old.data(),
-            d_F_from_f.data(),
-            d_F_from_hi.data(),
-            d_rhs4.data(),
-            d_rhs_buffer.data(),
-            d_rhs_high_coeff.data(),
-            d_coe.data(),
-            S_s, sigma_c, T_c,
-            Ng, nyz, NmuNom,
-            dt, dg, density,
-            is_secondary, source_term, source_term_f, enable_straggling
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        energyDgCnSolveFromPrecomputeKernel<<<grid_size, block_size, 0, stream>>>(
-            d_F_from_f.data(),
-            d_F_from_hi.data(),
-            d_rhs4.data(),
-            d_rhs_buffer.data(),
-            d_rhs_high_coeff.data(),
-            d_coe.data(),
-            d_F_new.data(),
-            d_f_new.data(),
-            Ng, nyz, NmuNom
-        );
-        CUDA_CHECK(cudaGetLastError());
+        {
+            ScopedCudaEventTimer timer(stream, timing ? &timing->recurrence_seconds : nullptr);
+            energyDgCnKernel<<<grid_size, block_size, 0, stream>>>(
+                F, f_F,
+                d_F_new.data(), d_f_new.data(),
+                S_s, sigma_c, T_c,
+                Ng, nyz, NmuNom,
+                dt, dg, density,
+                is_secondary, source_term, source_term_f, use_legacy, enable_straggling
+            );
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 
-    CUDA_CHECK(cudaMemcpyAsync(F, d_F_new.data(),
-                               static_cast<size_t>(total) * sizeof(double),
-                               cudaMemcpyDeviceToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(f_F, d_f_new.data(),
-                               static_cast<size_t>(total) * sizeof(double),
-                               cudaMemcpyDeviceToDevice, stream));
+    {
+        ScopedCudaEventTimer timer(stream, timing ? &timing->copy_out_seconds : nullptr);
+        CUDA_CHECK(cudaMemcpyAsync(F, d_F_new.data(),
+                                   static_cast<size_t>(total) * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(f_F, d_f_new.data(),
+                                   static_cast<size_t>(total) * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
 }
 
 void EnergyDepositionSolver::solveSecondaryFromPrimary(
     double* F_secondary, double* f_secondary,
     const double* F_primary, const double* f_primary,
     const double* ker_e1, const double* ker_e2, const double* ker_v,
+    const int* ker_e_begin, const int* ker_e_end,
     const double* S_s, const double* sigma_c, const double* T_c,
     double dt, double dg, double density,
     int nyz, int NmuNom,
     bool use_legacy,
     bool enable_straggling,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    EnergyTiming* timing) {
 
     int Ng = n_equations;
     long long n_per_E = static_cast<long long>(nyz) * NmuNom;
@@ -513,27 +525,28 @@ void EnergyDepositionSolver::solveSecondaryFromPrimary(
     if (d_rhs_buffer.getSize() < static_cast<size_t>(total)) {
         d_rhs_buffer.allocate(static_cast<size_t>(total));
     }
-    if (d_collision_f_temp.getSize() < static_cast<size_t>(total)) {
-        d_collision_f_temp.allocate(static_cast<size_t>(total));
-    }
-
     int block_size = 256;
     int total_grid = static_cast<int>((total + block_size - 1) / block_size);
-    secondarySourceFromPrimaryKernel<<<total_grid, block_size, 0, stream>>>(
-        F_primary,
-        f_primary,
-        d_rhs_buffer.data(),
-        d_collision_f_temp.data(),
-        ker_e1,
-        ker_e2,
-        ker_v,
-        Ng,
-        nyz,
-        NmuNom,
-        dg
-    );
-    CUDA_CHECK(cudaGetLastError());
+    {
+        ScopedCudaEventTimer timer(stream, timing ? &timing->secondary_source_seconds : nullptr);
+        secondarySourceFromPrimaryKernel<<<total_grid, block_size, 0, stream>>>(
+            F_primary,
+            f_primary,
+            d_rhs_buffer.data(),
+            ker_e1,
+            ker_e2,
+            ker_v,
+            ker_e_begin,
+            ker_e_end,
+            Ng,
+            nyz,
+            NmuNom,
+            dg
+        );
+        CUDA_CHECK(cudaGetLastError());
+    }
 
+    EnergyTiming update_timing;
     solve(F_secondary, f_secondary,
           F_secondary, f_secondary,
           S_s, sigma_c, T_c,
@@ -543,7 +556,20 @@ void EnergyDepositionSolver::solveSecondaryFromPrimary(
           nullptr,
           use_legacy,
           enable_straggling,
-          stream);
+          stream,
+          timing ? &update_timing : nullptr);
+    if (timing) {
+        timing->secondary_update_seconds += update_timing.copy_in_seconds
+                                          + update_timing.legacy_kernel_seconds
+                                          + update_timing.precompute_seconds
+                                          + update_timing.recurrence_seconds
+                                          + update_timing.copy_out_seconds;
+        timing->copy_in_seconds += update_timing.copy_in_seconds;
+        timing->legacy_kernel_seconds += update_timing.legacy_kernel_seconds;
+        timing->precompute_seconds += update_timing.precompute_seconds;
+        timing->recurrence_seconds += update_timing.recurrence_seconds;
+        timing->copy_out_seconds += update_timing.copy_out_seconds;
+    }
 }
 
 void EnergyDepositionSolver::solveBatch(

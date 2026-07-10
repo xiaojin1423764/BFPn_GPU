@@ -45,12 +45,24 @@ struct PhysicsParams {
     bool no_transport;
     bool no_angle;
     bool no_spatial_clipping;
+    bool profile_steps;
     int streaming_lane_chunk;
     int streaming_energy_chunk;
     std::string streaming_dir;
     std::vector<double> spot_depths;
     std::string spot_prefix;
     int idd_stride;
+};
+
+struct StepProfile {
+    double energy_seconds = 0.0;
+    double transport_seconds = 0.0;
+    double angle_seconds = 0.0;
+    double diagnostics_seconds = 0.0;
+    double total_seconds = 0.0;
+    EnergyTiming energy_timing;
+    double primary_energy_solve_seconds = 0.0;
+    int steps = 0;
 };
 
 class HostDoubleBuffer {
@@ -116,6 +128,7 @@ private:
     // 内核数组
     DeviceArray<double> d_ker_e, d_ker_e1, d_ker_e2;  // 能量核
     DeviceArray<double> d_ker_v;                      // 角度核 [Ng][Nangle][Nangle]
+    DeviceArray<int> d_ker_e_begin, d_ker_e_end;      // 每个输出能量的非零源能量范围
 
     // Out-of-core streaming state for full-grid development.
     DeviceArray<double> d_stream_F, d_stream_f_F;
@@ -161,9 +174,9 @@ private:
     void initializePhysicsQuantities();
     
     // 单步求解
-    void stepPrimary(int ping, double t);
-    void stepPrimaryEnergyOnly();
-    void stepSecondary(int ping, int pong, double t);
+    void stepPrimary(int ping, double t, StepProfile* profile = nullptr);
+    void stepPrimaryEnergyOnly(StepProfile* profile = nullptr);
+    void stepSecondary(int ping, int pong, double t, StepProfile* profile = nullptr);
     void stepLitePrimary();
     void solveStreamingFull(double tFinal);
     void initializeStreamingStore();
