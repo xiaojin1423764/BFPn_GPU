@@ -650,6 +650,8 @@ __global__ void streamingSecondarySourceKernel(
     const double* ker_e1,
     const double* ker_e2,
     const double* ker_v,
+    const int* ker_e_begin,
+    const int* ker_e_end,
     int Ng,
     int lanes,
     size_t lane0,
@@ -667,7 +669,9 @@ __global__ void streamingSecondarySourceKernel(
 
     double q1 = 0.0;
     double q2 = 0.0;
-    for (int src_e = 0; src_e < Ng; ++src_e) {
+    const int src_begin = ker_e_begin ? max(0, ker_e_begin[out_e]) : 0;
+    const int src_end = ker_e_end ? min(Ng, ker_e_end[out_e]) : Ng;
+    for (int src_e = src_begin; src_e < src_end; ++src_e) {
         double e1 = ker_e1[static_cast<long long>(out_e) * Ng + src_e];
         double e2 = ker_e2[static_cast<long long>(out_e) * Ng + src_e];
         if (e1 == 0.0 && e2 == 0.0) continue;
@@ -1831,6 +1835,8 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                 d_ker_e1.data(),
                 d_ker_e2.data(),
                 d_ker_v.data(),
+                d_ker_e_begin.data(),
+                d_ker_e_end.data(),
                 grid.Ng,
                 lanes,
                 lane0,
@@ -2129,6 +2135,111 @@ void BFPnSolver::streamingAnglePairStep(const std::string& F_path,
     }
 }
 
+void BFPnSolver::streamingTransportAngleTransportPairStep(const std::string& F_path,
+                                                          const std::string& f_F_path,
+                                                          double transport_dt,
+                                                          double angle_dt,
+                                                          StepProfile* profile) {
+    const size_t nyz = static_cast<size_t>(grid.Ny + 1) * (grid.Nz + 1);
+    const size_t n_angle = static_cast<size_t>(grid.Nmu) * grid.Nom;
+    const size_t per_energy = nyz * n_angle;
+    const int energy_chunk = std::max(1, phys.streaming_energy_chunk);
+    const size_t max_chunk_size = static_cast<size_t>(std::min(energy_chunk, grid.Ng)) * per_energy;
+    h_stream_chunk.resize(max_chunk_size);
+    h_stream_f_lane.resize(max_chunk_size);
+    cudaStream_t stream = stream_primary[0];
+
+    for (int e0 = 0; e0 < grid.Ng; e0 += energy_chunk) {
+        int ecount = std::min(energy_chunk, grid.Ng - e0);
+        size_t chunk_size = static_cast<size_t>(ecount) * per_energy;
+        size_t offset = static_cast<size_t>(e0) * per_energy;
+
+        auto phase_start = Clock::now();
+        readStore(F_path, offset, h_stream_chunk.data(), chunk_size);
+        readStore(f_F_path, offset, h_stream_f_lane.data(), chunk_size);
+        CUDA_CHECK(cudaMemcpyAsync(d_stream_F.data(),
+                                   h_stream_chunk.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_stream_f_F.data(),
+                                   h_stream_f_lane.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
+        transport_solver->solve(d_stream_F.data(),
+                                d_Omend.data(),
+                                ecount,
+                                static_cast<int>(n_angle),
+                                transport_dt,
+                                stream,
+                                false);
+        transport_solver->solve(d_stream_f_F.data(),
+                                d_Omend.data(),
+                                ecount,
+                                static_cast<int>(n_angle),
+                                transport_dt,
+                                stream,
+                                true);
+        if (profile) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            profile->transport_seconds += secondsSince(phase_start);
+            phase_start = Clock::now();
+        }
+
+        angle_solver->solve(d_stream_F.data(),
+                            d_sig_trg.data() + e0,
+                            static_cast<int>(nyz),
+                            ecount,
+                            angle_dt,
+                            phys.density,
+                            stream);
+        angle_solver->solve(d_stream_f_F.data(),
+                            d_sig_trg.data() + e0,
+                            static_cast<int>(nyz),
+                            ecount,
+                            angle_dt,
+                            phys.density,
+                            stream);
+        if (profile) {
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            profile->angle_seconds += secondsSince(phase_start);
+            phase_start = Clock::now();
+        }
+
+        transport_solver->solve(d_stream_F.data(),
+                                d_Omend.data(),
+                                ecount,
+                                static_cast<int>(n_angle),
+                                transport_dt,
+                                stream,
+                                false);
+        transport_solver->solve(d_stream_f_F.data(),
+                                d_Omend.data(),
+                                ecount,
+                                static_cast<int>(n_angle),
+                                transport_dt,
+                                stream,
+                                true);
+        CUDA_CHECK(cudaMemcpyAsync(h_stream_chunk.data(),
+                                   d_stream_F.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyDeviceToHost,
+                                   stream));
+        CUDA_CHECK(cudaMemcpyAsync(h_stream_f_lane.data(),
+                                   d_stream_f_F.data(),
+                                   chunk_size * sizeof(double),
+                                   cudaMemcpyDeviceToHost,
+                                   stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        writeStore(F_path, offset, h_stream_chunk.data(), chunk_size);
+        writeStore(f_F_path, offset, h_stream_f_lane.data(), chunk_size);
+        if (profile) {
+            profile->transport_seconds += secondsSince(phase_start);
+        }
+    }
+}
+
 void BFPnSolver::solveStreamingFull(double tFinal) {
     std::vector<std::pair<double, double>> idd_history;
     std::vector<std::pair<double, double>> proxy_history;
@@ -2165,15 +2276,9 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
         auto phase_start = Clock::now();
         streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt);
         profile.energy_seconds += secondsSince(phase_start);
-        phase_start = Clock::now();
-        streamingTransportPairStep(stream_F_path, stream_f_F_path, half_dt);
-        profile.transport_seconds += secondsSince(phase_start);
-        phase_start = Clock::now();
-        streamingAnglePairStep(stream_F_path, stream_f_F_path, grid.dt);
-        profile.angle_seconds += secondsSince(phase_start);
-        phase_start = Clock::now();
-        streamingTransportPairStep(stream_F_path, stream_f_F_path, half_dt);
-        profile.transport_seconds += secondsSince(phase_start);
+        streamingTransportAngleTransportPairStep(stream_F_path, stream_f_F_path,
+                                                 half_dt, grid.dt,
+                                                 phys.profile_steps ? &profile : nullptr);
         phase_start = Clock::now();
         streamingEnergyStep(stream_F_path, stream_f_F_path, nullptr, nullptr, false, half_dt,
                             compute_idd ? &idd : nullptr);
@@ -2190,15 +2295,9 @@ void BFPnSolver::solveStreamingFull(double tFinal) {
                                 false,
                                 cache_secondary_source);
             profile.energy_seconds += secondsSince(phase_start);
-            phase_start = Clock::now();
-            streamingTransportPairStep(stream_F1_path, stream_f_F1_path, half_dt);
-            profile.transport_seconds += secondsSince(phase_start);
-            phase_start = Clock::now();
-            streamingAnglePairStep(stream_F1_path, stream_f_F1_path, grid.dt);
-            profile.angle_seconds += secondsSince(phase_start);
-            phase_start = Clock::now();
-            streamingTransportPairStep(stream_F1_path, stream_f_F1_path, half_dt);
-            profile.transport_seconds += secondsSince(phase_start);
+            streamingTransportAngleTransportPairStep(stream_F1_path, stream_f_F1_path,
+                                                     half_dt, grid.dt,
+                                                     phys.profile_steps ? &profile : nullptr);
             phase_start = Clock::now();
             streamingEnergyStep(stream_F1_path, stream_f_F1_path,
                                 &stream_F_path, &stream_f_F_path,

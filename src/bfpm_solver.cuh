@@ -205,6 +205,11 @@ private:
     void streamingAnglePairStep(const std::string& F_path,
                                 const std::string& f_F_path,
                                 double dt);
+    void streamingTransportAngleTransportPairStep(const std::string& F_path,
+                                                  const std::string& f_F_path,
+                                                  double transport_dt,
+                                                  double angle_dt,
+                                                  StepProfile* profile = nullptr);
     double computeScalarDoseProxy();
     double computeEnergyFlux(const double* F, const double* f_F);
     double computeIntegratedDepthDose();
