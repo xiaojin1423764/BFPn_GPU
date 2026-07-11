@@ -619,6 +619,81 @@ water-230 optimized vs disabled IDD        byte-identical
 ctest                                      1/1 passed
 ```
 
+## Three-Item Backing-Path Pass: 2026-07-11
+
+Three additional changes were evaluated with spatial positivity clipping kept
+enabled throughout.
+
+### 1. Tiled backing layout: reverted
+
+A lane-slab physical file layout and conversion helpers were implemented. The
+legacy and tiled streaming IDD files were byte-for-byte identical, and the
+full-vs-streaming maximum relative difference remained `4.03e-16`. However,
+the adjacent large-grid timing regressed:
+
+```text
+legacy layout                           28.283244 s
+tiled lane-slab layout                  29.289776 s
+regression                                   3.6%
+```
+
+The layout and conversion code were removed. Lower syscall count alone did not
+offset the conversion and access costs.
+
+### 2. Primary operator-boundary fusion: retained
+
+The streaming primary path now processes energy chunks from high to low and
+executes:
+
+```text
+transport half step -> angle full step -> transport half step
+-> second primary energy half step
+```
+
+while a chunk is resident. Four lane carry arrays preserve old/new `F/f_F`
+values at energy-chunk boundaries. This eliminates one complete primary state
+writeback and the following energy-pass reread. Straggling keeps the original
+path, and `--no-fused-stream-boundary` is available for same-binary comparison.
+
+```text
+fusion disabled                         27.252030 s
+fusion enabled                          24.593229 s
+improvement                                  9.8%
+```
+
+Correctness checks:
+
+```text
+bone-100, two steps, fusion on/off       IDD and diagnostic byte-identical
+water-230, two steps, fusion on/off      max_abs 8.67e-19
+                                         max_rel 1.82e-16 (one ULP)
+compute-sanitizer memcheck               ERROR SUMMARY: 0 errors
+ctest                                    1/1 passed
+spatial positivity clipping              enabled
+```
+
+The water-230 difference is caused by the reversed energy-chunk reduction
+order; it is within double-precision rounding and does not change the computed
+curve.
+
+### 3. Secondary source/recurrence fusion: reverted
+
+A prototype directly consumed the tiled secondary source inside the high-to-low
+energy recurrence, avoiding the intermediate device source array. It preserved
+the original source-energy and angular-neighbor accumulation order and produced
+byte-identical small-test output. Its resource use and end-to-end result were
+unfavorable:
+
+```text
+prototype kernel                         128 registers, 64-byte stack
+fused secondary source                   10.071184 s
+retained source + recurrence              2.680719 s + 0.465401 s
+```
+
+The prototype was removed. Assigning a whole energy recurrence to each lane
+reduced GPU parallelism too much; a future attempt needs a different source
+factorization rather than this per-lane serial fusion.
+
 ## Required Scheme A/B Tests
 
 Run these before accepting Scheme A or any later Scheme B implementation.

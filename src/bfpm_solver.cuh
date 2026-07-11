@@ -46,6 +46,7 @@ struct PhysicsParams {
     bool no_angle;
     bool no_spatial_clipping;
     bool no_zero_chunk_skip;
+    bool no_fused_stream_boundary;
     bool profile_steps;
     int streaming_lane_chunk;
     int streaming_energy_chunk;
@@ -141,6 +142,8 @@ private:
     DeviceArray<double> d_stream_F1, d_stream_f_F1;
     DeviceArray<double> d_stream_primary_F, d_stream_primary_f_F;
     DeviceArray<double> d_stream_old_F, d_stream_old_f_F;
+    DeviceArray<double> d_stream_carry_old_F, d_stream_carry_old_f;
+    DeviceArray<double> d_stream_carry_new_F, d_stream_carry_new_f;
     std::string stream_F_path, stream_f_F_path;
     std::string stream_F1_path, stream_f_F1_path;
     std::string stream_source_path;
@@ -221,7 +224,10 @@ private:
                                                   const std::string& f_F_path,
                                                   double transport_dt,
                                                   double angle_dt,
-                                                  StepProfile* profile = nullptr);
+                                                  StepProfile* profile = nullptr,
+                                                  bool fuse_energy = false,
+                                                  double energy_dt = 0.0,
+                                                  double* idd_accum = nullptr);
     double computeScalarDoseProxy();
     double computeEnergyFlux(const double* F, const double* f_F);
     double computeIntegratedDepthDose();

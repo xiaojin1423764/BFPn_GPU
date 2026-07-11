@@ -230,6 +230,29 @@ the model used in the paper.
     reduced the primary-only large-grid total from `21.42 s` to `20.51 s` and is
     retained. Cross-chunk double buffering now also overlaps writeback with the
     following read/H2D/compute sequence.
+  - A lane-slab tiled physical backing layout was implemented and validated,
+    but regressed the adjacent large-grid run from `28.283 s` to `29.290 s`
+    (3.6% slower), so it was reverted.
+
+- [x] Fuse the primary operator boundary in streaming mode.
+  - The retained path executes transport, angle, transport, and the second
+    primary energy half-step while each energy chunk is resident.
+  - Four lane carry buffers preserve the old/new high-energy recurrence values
+    across chunks, removing one complete primary `F/f_F` backing-store write
+    and reread.
+  - `--no-fused-stream-boundary` provides a same-binary fallback.
+  - Adjacent `30x30x500x20x20` runs improved from `27.252 s` to `24.593 s`
+    (9.8%). Bone-100 output is byte-identical; water-230 differs by at most
+    `8.67e-19` absolute / `1.82e-16` relative from changed reduction order;
+    compute-sanitizer reports zero errors.
+
+- [ ] Fuse the secondary source directly into the energy recurrence.
+  - A four-output-energy prototype was numerically identical on the small
+    secondary test, but used 128 registers and a 64-byte stack frame.
+  - On the `30x30x500x20x20` workload its source kernel took `10.071 s`, versus
+    `2.681 s` source plus `0.465 s` recurrence for the retained separate path.
+  - The prototype was reverted. Revisit only with a formulation that preserves
+    source-kernel parallelism, such as a staged GEMM/SpMM design.
 
 - [x] Skip provably inactive high-energy streaming ranges.
   - Initialization records the highest exactly nonzero primary energy group.

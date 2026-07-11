@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
     bool no_angle = false;
     bool no_spatial_clipping = false;
     bool no_zero_chunk_skip = false;
+    bool no_fused_stream_boundary = false;
     bool profile_steps = false;
     int streaming_lane_chunk = 262144;
     int streaming_energy_chunk = 128;
@@ -156,6 +157,8 @@ int main(int argc, char** argv) {
             no_spatial_clipping = true;
         } else if (arg == "--no-zero-chunk-skip") {
             no_zero_chunk_skip = true;
+        } else if (arg == "--no-fused-stream-boundary") {
+            no_fused_stream_boundary = true;
         } else if (arg == "--profile-steps") {
             profile_steps = true;
         } else if (arg == "--sigma-yz" && i + 1 < argc) {
@@ -200,6 +203,7 @@ int main(int argc, char** argv) {
                       << "  --no-angle       Skip the angular diffusion subsystem\n"
                       << "  --no-spatial-clipping Disable positivity clipping in spatial transport\n"
                       << "  --no-zero-chunk-skip Disable inactive high-energy chunk skipping\n"
+                      << "  --no-fused-stream-boundary Disable fused transport/second-energy pass\n"
                       << "  --profile-steps  Print energy/transport/angle step timing summary\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
@@ -271,6 +275,7 @@ int main(int argc, char** argv) {
     phys.no_angle = no_angle;
     phys.no_spatial_clipping = no_spatial_clipping;
     phys.no_zero_chunk_skip = no_zero_chunk_skip;
+    phys.no_fused_stream_boundary = no_fused_stream_boundary;
     phys.profile_steps = profile_steps;
     phys.streaming_lane_chunk = streaming_lane_chunk;
     phys.streaming_energy_chunk = streaming_energy_chunk;
