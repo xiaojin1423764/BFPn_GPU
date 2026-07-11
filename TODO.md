@@ -4,20 +4,19 @@
 
 - [ ] Optimize angular sine-series/DST implementation.
   - Current Eq. `(21)` path uses direct global-memory sine transforms for
-    `Nmu,Nom <= 32`, separable real DST kernels for `Nmu,Nom <= 128`, and an
+    `Nmu,Nom <= 8`, separable real DST kernels for `Nmu,Nom <= 128`, and an
     odd-extension FFT fallback above that range.
   - Further optimize the separable DST path and revisit a library-backed batched
     DST/FFT path for very large angular grids.
   - Keep the zero-boundary Eq. `(21)` semantics; do not return to periodic FFT.
 
-- [ ] Fix data dependency in `stepPrimary`.
-  - Current code launches angular diffusion and spatial transport on `d_F` in different streams.
-  - Both read/write `d_F`, so this is not a safe overlap.
-  - Use sequential execution or double-buffered input/output arrays.
+- [x] Fix data dependency in `stepPrimary`.
+  - Energy, spatial transport, and angular diffusion now execute sequentially on
+    `stream_primary[0]`, with synchronization between dependent operators.
 
-- [ ] Move dose reduction to GPU.
-  - Current IDD and scalar proxy reductions still copy block sums back to host every step.
-  - Implement GPU reduction and copy back one scalar, or output depth-local dose arrays.
+- [x] Move dose reduction to GPU.
+  - IDD, scalar proxy, and energy-flux block sums are recursively reduced on the
+    GPU; only one double is copied to the host.
 
 ## Paper-Correct Output
 
@@ -153,6 +152,95 @@ the model used in the paper.
 
 ## Performance
 
+### Next Optimization Priorities
+
+- [x] Add a cross-chunk double-buffer pipeline.
+  - Overlap `pwrite(chunk N)` with `pread`, H2D, and GPU compute for `chunk N+1`.
+  - Use two pinned host-buffer pairs and preserve 17-digit IDD validation within
+    double-precision rounding tolerance.
+  - Measure end-to-end time, not only overlapped phase time.
+  - Retained implementation overlaps chunk writeback with the next chunk's read
+    and GPU work using two pinned host-buffer pairs.
+
+- [x] Reduce complete backing-store passes between split operators.
+  - Investigate a blocked layout shared by the energy and transport/angle paths.
+  - Do not repeat the reverted naive mmap, full-lane, or pure on-disk reorder attempts.
+  - Retain a redesign only if it reduces transferred bytes or complete file scans.
+  - The retained change removes `source.bin`: Scheme A recomputes the secondary
+    source for the second half-step, reducing backing files from five to four.
+  - A shared blocked layout for the four state files remains a separate future
+    investigation.
+
+- [x] Replace profiling-path host synchronization with CUDA events.
+  - Keep `--profile-steps` phase timings without serializing the chunk pipeline.
+  - Add separate storage I/O, H2D/D2H, kernel, and overlap measurements.
+  - Energy, transport, and angle kernel intervals now use CUDA events and avoid
+    intermediate host barriers under `--profile-steps`.
+
+- [x] Optimize MUSCL neighborhood loading.
+  - Evaluate shared-memory spatial tiles or angle-vectorized loads.
+  - Do not repeat the reverted `32 angles x 8 cells` block mapping unchanged.
+  - Preserve the Eq. `(22)` limiter and high-precision full-vs-streaming checks.
+  - Neighbor indices and plane bases are computed once per output point; the
+    limiter arithmetic and the validated block geometry are unchanged.
+
+- [x] Move IDD and scalar reductions fully to the GPU.
+  - Reduce device block sums to one scalar before copying to the host.
+  - Avoid allocating and copying a host block-sum vector on every sampled step.
+  - A second reduction scratch buffer supports recursive device reduction to one
+    scalar without in-place races.
+
+- [ ] Rework streaming secondary source as GEMM/sparse-SpMM.
+  - The pre-Scheme-A sparse streaming source used angular transition lists and
+    energy nonzero ranges, but its large-grid profile showed secondary source at
+    about `19-22 s` for `Ny=Nz=40, Ng=500, Nmu=Nom=20, time=0.8`.
+  - Scheme A is the validated fused tiled secondary-source implementation documented in
+    `STREAMING_OPTIMIZATION.md`. It computes a small output-energy tile per lane
+    to reuse angular sparse-convolution traversal without writing an intermediate
+    source array.
+  - Scheme A is byte-identical to full mode and the sparse streaming baseline,
+    passes compute-sanitizer, reduces the measured source time from `19.38 s` to
+    `2.09 s`, and reduces same-machine total time from `89.44 s` to `71.29 s`.
+  - Next high-impact direction is to reformulate source generation as batched
+    dense GEMM or sparse SpMM over `(cell, angle)` blocks, rather than one
+    thread looping over source energy and angular neighbors.
+  - A simple two-stage factorization (`angular convolution` then `energy
+    accumulation`) reduced the measured source kernel to about `0.84 s`, but
+    increased total time to about `109.8 s` because intermediate writes and
+    memory pressure slowed I/O/transport/angle; do not retain that version.
+  - Keep bitwise/full-vs-streaming IDD validation before retaining any rewrite.
+
+- [ ] Redesign streaming energy/source I/O layout.
+  - The source-cache pass is removed, and state-file writes are double-buffered.
+    The remaining bottleneck is the four complete state files and their
+    energy-major versus lane-slab access mismatch.
+  - Scheme B is the planned layout redesign documented in
+    `STREAMING_OPTIMIZATION.md`: dual layout, chunk-local transpose, or
+    lane-major scratch paths for the energy/source hot path.
+  - Investigate a real layout redesign or chunk-local transpose strategy for
+    energy/lane access, not naive mmap or full-lane buffers.
+  - Previous attempts to use mmap backing files, full-lane chunks, and simple
+    angle-pair factor reuse were measured slower and should not be repeated
+    without a different design.
+  - A chunk-major source-cache scratch layout reduced source I/O from `5.70 s`
+    to `5.22 s`, but regressed total time from `71.29 s` to `75.56 s`; it was
+    reverted. A future Scheme B must eliminate a data pass or overlap I/O and
+    GPU execution, not only reduce the number of `pread`/`pwrite` calls.
+  - Paired `F/f_F` backing-file reads and writes now run concurrently. This
+    reduced the primary-only large-grid total from `21.42 s` to `20.51 s` and is
+    retained. Cross-chunk double buffering now also overlaps writeback with the
+    following read/H2D/compute sequence.
+
+- [x] Skip provably inactive high-energy streaming ranges.
+  - Initialization records the highest exactly nonzero primary energy group.
+  - Without straggling, the DG recurrence cannot create higher-energy values;
+    the catastrophic source kernel is checked to be energy non-increasing.
+  - Energy passes only read, transfer, solve, and write the active prefix, while
+    transport/angle skips chunks wholly above it.
+  - `--no-zero-chunk-skip` retains a same-binary A/B fallback.
+  - The `30x30x500x20x20`, two-step water-100 benchmark improved from
+    `34.809 s` to `24.631 s` (29.2%) with byte-identical IDD.
+
 - [ ] Add NVTX ranges around solver phases.
   - `initialize`
   - `stepPrimary.angle`
@@ -171,12 +259,18 @@ the model used in the paper.
   - Optimize the direct sine-series kernels or replace them with a verified
     batched odd-extension FFT/DST.
   - Keep Eq. `(21)` zero-boundary semantics.
+  - The paper `20x20` grid now uses the separable DST instead of the direct 2D
+    transform, and the inverse writes directly to its final output. In the final
+    large secondary benchmark, angle time fell from `9.20 s` to `0.55 s`, and
+    direct-vs-separable IDD remained byte-identical in the validation case.
 
 - [ ] Optimize spatial transport kernels after algorithmic fixes.
   - Reduce integer division/modulo if possible.
   - Consider layout changes for coalescing.
   - Review FP64 usage and whether FP32/mixed precision is acceptable.
   - Use double buffering to avoid in-place hazards.
+  - The MUSCL corrector now writes in place after both flux arrays are complete,
+    removing one full-array D2D copy and one temporary device array per solver.
 
 - [ ] Optimize energy step.
   - Optimize the current coefficient precompute plus high-to-low energy

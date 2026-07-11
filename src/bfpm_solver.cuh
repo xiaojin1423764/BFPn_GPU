@@ -45,6 +45,7 @@ struct PhysicsParams {
     bool no_transport;
     bool no_angle;
     bool no_spatial_clipping;
+    bool no_zero_chunk_skip;
     bool profile_steps;
     int streaming_lane_chunk;
     int streaming_energy_chunk;
@@ -62,6 +63,8 @@ struct StepProfile {
     double total_seconds = 0.0;
     EnergyTiming energy_timing;
     double primary_energy_solve_seconds = 0.0;
+    size_t streaming_chunks_total = 0;
+    size_t streaming_chunks_skipped = 0;
     int steps = 0;
 };
 
@@ -111,6 +114,7 @@ private:
     DeviceArray<double> d_F, d_f_F;       // 主质子
     DeviceArray<double> d_F1, d_f_F1;     // 二次质子
     DeviceArray<double> d_reduction_sums;  // GPU归约临时缓冲
+    DeviceArray<double> d_reduction_scratch;
     DeviceArray<double> d_energy_moments;   // [Ng][2] energy moment diagnostics
     DeviceArray<double> d_spot_plane;      // YZ dose plane output buffer
     
@@ -141,11 +145,14 @@ private:
     std::string stream_F1_path, stream_f_F1_path;
     std::string stream_source_path;
     mutable std::unordered_map<std::string, int> stream_fds;
+    std::unordered_map<std::string, int> stream_max_active_energy;
+    bool stream_source_energy_nonincreasing = true;
     HostDoubleBuffer h_stream_lane;
     HostDoubleBuffer h_stream_f_lane;
     HostDoubleBuffer h_stream_primary_lane;
     HostDoubleBuffer h_stream_primary_f_lane;
     HostDoubleBuffer h_stream_chunk;
+    HostDoubleBuffer h_stream_f_chunk;
 
 public:
     BFPnSolver(const GridParams& g, const PhysicsParams& p);
@@ -188,6 +195,8 @@ private:
     void writeStore(const std::string& path, size_t element_offset,
                     const double* src, size_t count) const;
     int getStoreFd(const std::string& path) const;
+    const double* reduceDevicePartials(size_t count, cudaStream_t stream = 0);
+    double reducePartialsToHost(size_t count, cudaStream_t stream = 0);
     void streamingEnergyStep(const std::string& F_path,
                              const std::string& f_F_path,
                              const std::string* primary_F_path,

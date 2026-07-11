@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
     bool no_transport = false;
     bool no_angle = false;
     bool no_spatial_clipping = false;
+    bool no_zero_chunk_skip = false;
     bool profile_steps = false;
     int streaming_lane_chunk = 262144;
     int streaming_energy_chunk = 128;
@@ -153,6 +154,8 @@ int main(int argc, char** argv) {
             no_angle = true;
         } else if (arg == "--no-spatial-clipping") {
             no_spatial_clipping = true;
+        } else if (arg == "--no-zero-chunk-skip") {
+            no_zero_chunk_skip = true;
         } else if (arg == "--profile-steps") {
             profile_steps = true;
         } else if (arg == "--sigma-yz" && i + 1 < argc) {
@@ -196,6 +199,7 @@ int main(int argc, char** argv) {
                       << "  --no-transport   Skip the spatial transport subsystem\n"
                       << "  --no-angle       Skip the angular diffusion subsystem\n"
                       << "  --no-spatial-clipping Disable positivity clipping in spatial transport\n"
+                      << "  --no-zero-chunk-skip Disable inactive high-energy chunk skipping\n"
                       << "  --profile-steps  Print energy/transport/angle step timing summary\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
@@ -266,6 +270,7 @@ int main(int argc, char** argv) {
     phys.no_transport = no_transport;
     phys.no_angle = no_angle;
     phys.no_spatial_clipping = no_spatial_clipping;
+    phys.no_zero_chunk_skip = no_zero_chunk_skip;
     phys.profile_steps = profile_steps;
     phys.streaming_lane_chunk = streaming_lane_chunk;
     phys.streaming_energy_chunk = streaming_energy_chunk;
@@ -273,6 +278,9 @@ int main(int argc, char** argv) {
     phys.spot_depths = spot_depths;
     phys.spot_prefix = spot_prefix;
     phys.idd_stride = idd_stride;
+
+    std::cout << "Spatial positivity clipping: "
+              << (no_spatial_clipping ? "disabled" : "enabled") << std::endl;
     
     try {
         // 创建并运行求解器

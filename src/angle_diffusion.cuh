@@ -28,7 +28,6 @@ private:
     DeviceArray<cufftDoubleComplex> d_fft_buffer;
     DeviceArray<cufftDoubleComplex> d_diffusion_factor;
     DeviceArray<cufftDoubleComplex> d_sine_buffer;
-    DeviceArray<double> d_F_tmp;
     DeviceArray<double> d_sine_coeff;
     DeviceArray<double> d_sine_u;
     DeviceArray<double> d_sine_v;

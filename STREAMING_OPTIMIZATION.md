@@ -235,6 +235,505 @@ Decision:
 Reverted. Keep the existing std::vector reduction buffer.
 ```
 
+## Scheme A/B Optimization Plan
+
+This section records the two larger streaming optimization directions currently
+under discussion. Scheme A is validated and retained. A chunk-major source-cache
+variant of Scheme B was tested and reverted because it regressed end-to-end time.
+
+### Scheme A: fused tiled secondary-source kernel
+
+Goal:
+
+```text
+Reduce repeated angular-neighbor work in the streaming secondary source without
+creating a large intermediate global-memory source array.
+```
+
+Current implementation status:
+
+```text
+Implemented in src/bfpm_solver.cu and validated on an NVIDIA GeForce RTX 5070 Ti.
+```
+
+The new prototype kernel is:
+
+```text
+streamingSecondarySourceTiledEnergyKernel<OUT_TILE>
+```
+
+The current call path uses:
+
+```text
+OUT_TILE = 4
+```
+
+The old optimized sparse source kernel remains in the file as a fallback:
+
+```text
+streamingSecondarySourceKernel
+```
+
+Algorithmic idea:
+
+```text
+One thread owns one streaming lane and computes four neighboring output energy
+groups for that lane. For the same input lane and angular sparse transition
+list, it accumulates the catastrophic-scattering source into a small register
+tile over output energy. This reuses the angular sparse-convolution traversal
+across four output groups.
+```
+
+Compared with the previous sparse source kernel:
+
+```text
+previous: one thread computes one output energy group and repeats angular
+          neighbor traversal independently for each group
+
+scheme A: one thread computes OUT_TILE neighboring output groups and reuses the
+          angular traversal inside the thread
+```
+
+What it deliberately avoids:
+
+```text
+No separate angular-convolution output array is written to global memory.
+No two-stage source factorization is retained.
+No mmap/full-lane backing-store change is included in this scheme.
+```
+
+Reason for this design:
+
+```text
+The previous two-stage factorization made the measured source kernel much
+faster, but total runtime became worse because the intermediate source arrays
+increased memory traffic and pressure. Scheme A keeps the fusion inside one
+kernel and tries to reduce arithmetic traversal while preserving the existing
+streaming I/O structure.
+```
+
+Known risk before accepting:
+
+```text
+The prototype builds, but ptxas reports about 96 registers for the tiled source
+kernel versus about 60 registers for the previous sparse kernel. Occupancy may
+drop enough to erase or reverse the arithmetic benefit. This must be measured.
+```
+
+Validation result (2026-07-11):
+
+```text
+small full vs streaming IDD       byte-for-byte identical
+large sparse vs tiled IDD         byte-for-byte identical
+compute-sanitizer memcheck        ERROR SUMMARY: 0 errors
+
+same-machine large sparse:
+  total                           89.442 s
+  secondary source               19.380 s
+  external elapsed               97.15 s
+
+same-machine Scheme A:
+  total                           71.287 s
+  secondary source                2.087 s
+  external elapsed               78.98 s
+
+Scheme A improvement:
+  internal total                  20.3%
+  secondary source               89.2%
+
+primary-only regression:
+  total                           21.422 s
+  previous reference             21.33 s
+  difference                       0.4%
+```
+
+The higher register count did not outweigh reuse on this workload. Scheme A is
+therefore the accepted source kernel.
+
+Acceptance criteria:
+
+```text
+1. Full-vs-streaming IDD must remain bitwise identical on the small secondary
+   test, or any tiny FP-order difference must be explicitly quantified.
+2. compute-sanitizer must report no memory errors.
+3. Large secondary streaming runtime must improve over the current sparse-source
+   baseline, especially the "secondary source" profile line.
+4. Primary-only streaming runtime must not regress, because Scheme A should only
+   affect the secondary source path.
+```
+
+### Scheme B: streaming energy/source I/O layout redesign
+
+Goal:
+
+```text
+Reduce copy-in, copy-out, and secondary source cache I/O cost by changing how
+streaming chunks are laid out and moved between host backing storage and GPU
+working buffers.
+```
+
+Current status:
+
+```text
+A source-cache-only chunk-major scratch variant was implemented and measured,
+then reverted. A broader layout redesign has not been implemented.
+```
+
+Motivation from the pre-Scheme-A large-grid secondary profile:
+
+```text
+large secondary total time       about 94.341 s
+energy phase                     about 66.989 s
+secondary source                 about 21.731 s
+copy in                          about 17.320 s
+copy out                         about 18.033 s
+secondary source cache I/O        about 5.418 s
+```
+
+The current streaming layout is a compromise:
+
+```text
+energy step prefers lane-major chunks for high-to-low energy recurrence
+transport/angle steps prefer energy-contiguous chunks over spatial/angle lanes
+secondary source needs both primary input access and secondary source cache
+reuse
+```
+
+Possible Scheme B designs:
+
+```text
+1. Maintain two backing layouts:
+   one energy-step-friendly layout and one transport/angle-friendly layout.
+
+2. Use a chunk-local transpose:
+   read the existing backing layout, transpose inside pinned host memory or on
+   the GPU, run the operator with coalesced access, then transpose back only
+   when needed.
+
+3. Add lane-major scratch files only for source/energy hot paths:
+   avoid changing all operators at once, but let the secondary source and energy
+   recurrence read/write in the order they actually consume data.
+```
+
+Design constraints:
+
+```text
+Do not repeat the naive mmap backing-store attempt; it was bitwise correct but
+slower.
+
+Do not repeat full-lane/larger lane chunks as a standalone optimization; that
+made transport/angle/recurrence behavior worse in previous tests.
+
+Do not keep a layout redesign unless IDD validation remains correct and the
+large-grid timing improves end-to-end, not only in one kernel.
+```
+
+Expected benefit if successful:
+
+```text
+Scheme A mainly attacks secondary source arithmetic. Scheme B attacks the
+larger streaming overhead: H2D/D2H copies, host file reads/writes, and source
+cache traffic.
+```
+
+Tested and reverted (2026-07-11): chunk-major source cache
+
+```text
+The source cache is private to the energy pass, so the prototype stored each
+[Ng][lane chunk] slab contiguously. This reduced about Ng scattered pread/pwrite
+operations per lane chunk to one contiguous operation without changing the GPU
+layout.
+
+Scheme A baseline:
+  total                           71.287 s
+  secondary source I/O            5.704 s
+  external elapsed               78.98 s
+
+Scheme A + chunk-major cache:
+  total                           75.561 s
+  secondary source I/O            5.218 s
+  external elapsed               83.43 s
+
+IDD was byte-for-byte identical, and source-cache I/O improved by 8.5%, but
+internal total regressed by 6.0% and external elapsed regressed by 5.6%.
+```
+
+Decision:
+
+```text
+Do not retain the chunk-major source-cache-only variant. It reduces syscall
+count but not transferred bytes or H2D/D2H traffic. Any next Scheme B attempt
+must eliminate a full data pass or overlap storage I/O with GPU work; a pure
+on-disk reorder is not sufficient.
+```
+
+## Optimization Audit: 2026-07-11
+
+The post-Scheme-A audit retained three additional changes:
+
+```text
+1. Read and write F/f_F backing files concurrently to increase NVMe queue depth.
+2. Write the MUSCL corrector directly to F and remove its final full-array D2D copy.
+3. Use the separable DST for angular grids above 8x8 and write its inverse directly
+   to F, removing another full-array D2D copy and temporary array.
+```
+
+Numerical validation:
+
+```text
+default 7x7 full reference vs optimized streaming IDD   byte-for-byte identical
+20x20 direct DST vs optimized separable DST IDD         byte-for-byte identical
+large Scheme A vs final optimized IDD                   byte-for-byte identical
+compute-sanitizer memcheck                              ERROR SUMMARY: 0 errors
+```
+
+Measured performance on the RTX 5070 Ti:
+
+```text
+primary-only, paired backing-file I/O:
+  total                         21.422 s -> 20.514 s   (4.2% faster)
+
+primary-only, 20x20 separable DST:
+  angle                          3.55 s ->  0.212 s  (about 94% faster)
+  total                         21.422 s -> 17.153 s  (about 20% faster)
+
+large secondary, final retained path:
+  Scheme A total                71.287 s
+  final total                   59.463 s            (16.6% faster)
+  Scheme A angle                9.202 s
+  final angle                    0.546 s             (94.1% faster)
+  Scheme A external elapsed     78.98 s
+  final external elapsed        67.62 s             (14.4% faster)
+```
+
+The MUSCL and DST in-place outputs remove deterministic device-memory traffic and
+temporary storage. Their isolated timing is hidden by backing-store variance, so
+the measured end-to-end numbers above should not be attributed to those copies
+alone.
+
+The audit identified a true double-buffer pipeline as the next high-impact work:
+
+```text
+overlap pwrite(chunk N) with pread/H2D/compute(chunk N+1), using two pinned host
+buffer pairs and CUDA events for timing without host synchronization. After that,
+investigate whether a blocked layout can reduce complete backing-store passes
+between energy-major and transport/angle-major operators.
+```
+
+The writeback portion of this pipeline is implemented in the five-item pass
+below. A shared blocked layout remains future work.
+
+## Five-Item Optimization Pass: 2026-07-11
+
+Implemented and retained:
+
+```text
+1. Two-slot pinned-host writeback pipeline for energy and fused transport passes.
+2. Removed the source.bin pass; Scheme A recomputes source for the second half-step.
+3. CUDA-event timing replaces intermediate profiling synchronizations.
+4. MUSCL neighbor indices and plane bases are computed once per output point.
+5. IDD/scalar/energy-flux partials are recursively reduced to one scalar on GPU.
+```
+
+Numerical acceptance uses 17-digit output:
+
+```text
+7x7 final full vs streaming:
+  max_abs                       3.47e-18
+  max_rel                       2.15e-16
+
+20x20 final full vs streaming:
+  max_abs                       0
+  max_rel                       0
+
+pre-pass vs final streaming:
+  maximum observed max_abs      8.67e-18
+  maximum observed max_rel      7.88e-16
+
+compute-sanitizer memcheck      ERROR SUMMARY: 0 errors
+```
+
+Performance and storage:
+
+```text
+pre-pass final binary:
+  internal profiled total       59.463 s
+  external elapsed              67.62 s
+  backing store                 12.52 GiB / 5 files
+
+five-item pass:
+  internal profiled total       54.635 s
+  external no-profile elapsed   64.29 s
+  backing store                 10.02 GiB / 4 files
+```
+
+The profiled copy-out detail is accumulated work time and can exceed wall time
+because writeback overlaps subsequent chunks. Use solver total and external
+elapsed for end-to-end comparisons.
+
+## Active-Energy Prefix Optimization: 2026-07-11
+
+The retained streaming path now avoids work above the highest energy group that
+can be nonzero. The bound is established from exact initialization values and
+propagated without per-step scans or GPU atomics:
+
+```text
+energy DG recurrence without straggling: high energy -> low energy only
+catastrophic secondary kernel:           output energy <= source energy
+transport and angular diffusion:         do not change energy group
+```
+
+At initialization the source kernel matrices are checked for this triangular
+property. With straggling enabled, the bound expands conservatively by one group
+per energy half-step. The optimized energy pass reads/writes only the active
+prefix; fused transport/angle skips energy chunks wholly above the bound.
+`--no-zero-chunk-skip` disables both parts for same-binary comparison.
+
+Rejected variants before the retained implementation:
+
+```text
+read-ahead concurrent with writeback     regressed badly from storage contention
+fused primary-generated source cache     55.474 s vs 54.635 s baseline
+host scan for exact-zero chunks           59.049 s vs 54.635 s baseline
+GPU atomic active-bound tracking          59.846 s vs 54.635 s baseline
+```
+
+Same-binary A/B on water 100 MeV, two steps,
+`Ny=Nz=30, Ng=500, Nmu=Nom=20`:
+
+```text
+inactive skipping disabled               34.809281 s
+active-energy prefix + chunk skip         24.631010 s
+improvement                                  29.2%
+skipped transport/angle chunks             3 / 12 (25%)
+IDD SHA-256                               identical
+```
+
+Numerical checks:
+
+```text
+7x7 bone-100 full vs streaming max_abs    1.73e-18
+7x7 bone-100 full vs streaming max_rel    4.03e-16
+20x20 water-100 A/B IDD                    byte-identical
+water-230 optimized vs disabled IDD        byte-identical
+ctest                                      1/1 passed
+```
+
+## Required Scheme A/B Tests
+
+Run these before accepting Scheme A or any later Scheme B implementation.
+
+### Build
+
+```bash
+make
+```
+
+### Small secondary full-mode reference
+
+```bash
+/home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 20 \
+  --data /home/xj/BFPn_GPU_Solver/BFPn_CPU_Solver/water \
+  --time 4.0 --material water --energy 100 \
+  --ny 8 --nz 8 --ng 64 --nmu 7 --nom 7 --energy-model eq15
+```
+
+### Small secondary streaming check
+
+```bash
+/home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 20 \
+  --data /home/xj/BFPn_GPU_Solver/BFPn_CPU_Solver/water \
+  --time 4.0 --material water --energy 100 \
+  --ny 8 --nz 8 --ng 64 --nmu 7 --nom 7 --energy-model eq15 \
+  --streaming-full --energy-chunk 16 --lane-chunk 2048 \
+  --stream-dir /tmp/bfpn_verify_scheme_a --idd-stride 1 --profile-steps
+```
+
+Compare `idd_output.txt` from full and streaming runs:
+
+```text
+required before accepting: 17-digit output differences remain within quantified
+double-precision rounding tolerance
+```
+
+### Memory-safety check
+
+```bash
+compute-sanitizer --tool memcheck \
+  /home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 100 \
+  --data /home/xj/BFPn_GPU_Solver/BFPn_CPU_Solver/water \
+  --time 0.8 --material water --energy 100 \
+  --ny 4 --nz 4 --ng 500 --nmu 20 --nom 20 --energy-model eq15 \
+  --streaming-full --energy-chunk 128 --lane-chunk 2048 \
+  --stream-dir /tmp/bfpn_scheme_a_sanitizer --idd-stride 999 \
+  --profile-steps
+```
+
+Required result:
+
+```text
+ERROR SUMMARY: 0 errors
+```
+
+### Large secondary performance benchmark
+
+```bash
+/home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 100 \
+  --data /home/xj/BFPn_GPU_Solver/BFPn_CPU_Solver/water \
+  --time 0.8 --material water --energy 100 \
+  --ny 40 --nz 40 --ng 500 --nmu 20 --nom 20 --energy-model eq15 \
+  --streaming-full --energy-chunk 128 --lane-chunk 262144 \
+  --stream-dir /tmp/bfpn_scheme_a_secondary_t08 --idd-stride 999 \
+  --profile-steps
+```
+
+Compare against the current sparse-source baseline:
+
+```text
+total                            94.341 s
+energy                           66.989 s
+secondary source                 21.731 s
+copy in                          17.320 s
+copy out                         18.033 s
+secondary source I/O              5.418 s
+```
+
+For Scheme A, the most important line is:
+
+```text
+secondary source
+```
+
+For Scheme B, the most important lines are:
+
+```text
+copy in
+copy out
+secondary source I/O
+total
+```
+
+### Primary-only regression check
+
+```bash
+/home/xj/BFPn_GPU_Solver/build/bin/bfp_solver 100 \
+  --data /home/xj/BFPn_GPU_Solver/BFPn_CPU_Solver/water \
+  --time 0.4 --material water --energy 100 \
+  --ny 40 --nz 40 --ng 500 --nmu 20 --nom 20 --energy-model eq15 \
+  --streaming-full --primary-only --energy-chunk 128 --lane-chunk 262144 \
+  --stream-dir /tmp/bfpn_scheme_a_primary --idd-stride 999 \
+  --profile-steps
+```
+
+Current reference:
+
+```text
+primary-only large streaming total is about 21.33 s
+```
+
+Scheme A should not materially change this number because it changes the
+secondary source path, not the primary path.
+
 ## Remaining Optimization Opportunities
 
 ### 1. Profile the current streaming path
@@ -264,13 +763,13 @@ nsys profile --force-overwrite=true --trace=cuda,osrt --sample=none --cpuctxsw=n
 
 ### 2. Double-buffer streaming pipeline
 
-Current streaming chunks follow this pattern:
+The original streaming chunks followed this pattern:
 
 ```text
 read -> H2D -> kernel -> D2H -> synchronize -> write
 ```
 
-A double-buffer pipeline would overlap:
+The retained writeback pipeline overlaps:
 
 ```text
 chunk N GPU work
@@ -278,8 +777,9 @@ chunk N+1 host read / H2D preparation
 chunk N-1 D2H / host write
 ```
 
-This is likely the next meaningful optimization after the current local
-improvements.
+Energy and fused transport passes now use two pinned host-buffer slots. Device
+compute remains single-buffered, so a future extension may also overlap H2D/D2H
+on separate CUDA streams.
 
 Risk:
 
@@ -291,18 +791,21 @@ Correctness validation:
 
 ```text
 Run water100 time=0.4 and time=8.0.
-Require max_abs=0, max_rel=0 and BP=7.52 cm.
+Require 17-digit IDD differences within double-precision rounding tolerance and
+BP=7.52 cm.
 ```
 
 ### 3. Paper-grid multi-lane benchmark
 
-The source cache is meant for multi-lane paper-grid behavior. It should be
-benchmarked on a case where:
+Multi-lane paper-grid behavior should be benchmarked on a case where:
 
 ```text
 effective_lane_chunk < (Ny+1)*(Nz+1)*Nmu*Nom
-secondary source cache = on
+secondary source cache = off
 ```
+
+The current path recomputes the tiled Scheme A source for the second half-step
+and does not create `source.bin`.
 
 Useful test:
 
@@ -366,8 +869,8 @@ For final figure reproduction, keep:
 Next best engineering step:
 
 ```text
-Run nsys on the current optimized streaming code, then implement a
-double-buffer pipeline only for the hottest streaming pass.
+Prototype a shared blocked state layout that reduces complete scans of the four
+remaining backing files. Keep the existing double-buffer writeback pipeline.
 ```
 
 Continue to validate every change against:
@@ -375,6 +878,5 @@ Continue to validate every change against:
 ```text
 results/eq15_strict_fine_clip_water_100/idd_output.txt
 water100 BP = 7.52 cm
-full-vs-streaming IDD max_abs = 0
-full-vs-streaming IDD max_rel = 0
+17-digit full-vs-streaming IDD within double-precision rounding tolerance
 ```

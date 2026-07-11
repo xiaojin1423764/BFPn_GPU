@@ -225,6 +225,20 @@ When `--material water|bone|air` is provided and `--data` is omitted, the solver
 `BFPn_CPU_Solver/<material>/` cross-section files. Do not use the synthetic `data/`
 directory for Figure 3 reproduction; it is only for build and smoke-test runs.
 
+Run all four Figure 3 cases on the full paper grid with spatial positivity
+clipping enabled:
+
+```bash
+python3 scripts/run_paper_grid_clip.py
+```
+
+The runner uses `Nx=2000`, `Ny=Nz=80`, `Ng=500`, `Nmu=Nom=20`, Eq. `(15)`,
+and full primary/secondary out-of-core streaming. It deliberately does not pass
+`--no-spatial-clipping`. Completed cases are validated and skipped on reruns;
+an interrupted case must restart because solver checkpoint/resume is not yet
+implemented. On the measured RTX 5070 Ti workload, expect roughly 126 hours per
+case, or about 21 days for all four cases run serially.
+
 The optional positional argument is `Nx`. With `Lx=40`, the depth step is:
 
 ```text

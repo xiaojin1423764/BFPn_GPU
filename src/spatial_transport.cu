@@ -20,7 +20,7 @@ SpatialTransportSolver::~SpatialTransportSolver() {
     cufftDestroy(plan_inverse);
 }
 
-__device__ double muscl_paper_slope(double left, double center, double right) {
+__device__ __forceinline__ double muscl_paper_slope(double left, double center, double right) {
     double forward = right - center;
     if (fabs(forward) < Numerics::EPSILON) return 0.0;
     double theta = (center - left) / forward;
@@ -28,27 +28,7 @@ __device__ double muscl_paper_slope(double left, double center, double right) {
     return forward * eta;
 }
 
-__device__ double load_clamped(
-    const double* F,
-    int ek,
-    int ang,
-    int i,
-    int j,
-    int Ny,
-    int Nz,
-    int NmuNom
-) {
-    int Ny1 = Ny + 1;
-    int Nz1 = Nz + 1;
-    i = max(0, min(i, Ny1 - 1));
-    j = max(0, min(j, Nz1 - 1));
-    long long nyz = static_cast<long long>(Ny1) * Nz1;
-    long long s = static_cast<long long>(j) * Ny1 + i;
-    long long idx = (static_cast<long long>(ek) * nyz + s) * NmuNom + ang;
-    return F[idx];
-}
-
-__device__ double spatial_flux_divergence_value(
+__device__ __forceinline__ double spatial_flux_divergence_value(
     const double* F_in,
     const double* Omend,
     int ek,
@@ -71,10 +51,16 @@ __device__ double spatial_flux_divergence_value(
 
     double c = F_in[base];
 
-    double ym2 = load_clamped(F_in, ek, ang, i - 2, j, Ny, Nz, NmuNom);
-    double ym1 = load_clamped(F_in, ek, ang, i - 1, j, Ny, Nz, NmuNom);
-    double yp1 = load_clamped(F_in, ek, ang, i + 1, j, Ny, Nz, NmuNom);
-    double yp2 = load_clamped(F_in, ek, ang, i + 2, j, Ny, Nz, NmuNom);
+    const int im2 = max(0, i - 2);
+    const int im1 = max(0, i - 1);
+    const int ip1 = min(Ny, i + 1);
+    const int ip2 = min(Ny, i + 2);
+    const long long plane_base = static_cast<long long>(ek) * nyz * NmuNom + ang;
+    const long long y_row = static_cast<long long>(j) * Ny1;
+    double ym2 = F_in[plane_base + (y_row + im2) * NmuNom];
+    double ym1 = F_in[plane_base + (y_row + im1) * NmuNom];
+    double yp1 = F_in[plane_base + (y_row + ip1) * NmuNom];
+    double yp2 = F_in[plane_base + (y_row + ip2) * NmuNom];
     double slope_y_m1 = muscl_paper_slope(ym2, ym1, c);
     double slope_y_0 = muscl_paper_slope(ym1, c, yp1);
     double slope_y_p1 = muscl_paper_slope(c, yp1, yp2);
@@ -89,10 +75,14 @@ __device__ double spatial_flux_divergence_value(
         right_flux_y = omega_y * (yp1 - 0.5 * slope_y_p1);
     }
 
-    double zm2 = load_clamped(F_in, ek, ang, i, j - 2, Ny, Nz, NmuNom);
-    double zm1 = load_clamped(F_in, ek, ang, i, j - 1, Ny, Nz, NmuNom);
-    double zp1 = load_clamped(F_in, ek, ang, i, j + 1, Ny, Nz, NmuNom);
-    double zp2 = load_clamped(F_in, ek, ang, i, j + 2, Ny, Nz, NmuNom);
+    const int jm2 = max(0, j - 2);
+    const int jm1 = max(0, j - 1);
+    const int jp1 = min(Nz, j + 1);
+    const int jp2 = min(Nz, j + 2);
+    double zm2 = F_in[plane_base + (static_cast<long long>(jm2) * Ny1 + i) * NmuNom];
+    double zm1 = F_in[plane_base + (static_cast<long long>(jm1) * Ny1 + i) * NmuNom];
+    double zp1 = F_in[plane_base + (static_cast<long long>(jp1) * Ny1 + i) * NmuNom];
+    double zp2 = F_in[plane_base + (static_cast<long long>(jp2) * Ny1 + i) * NmuNom];
     double slope_z_m1 = muscl_paper_slope(zm2, zm1, c);
     double slope_z_0 = muscl_paper_slope(zm1, c, zp1);
     double slope_z_p1 = muscl_paper_slope(c, zp1, zp2);
@@ -218,8 +208,7 @@ void SpatialTransportSolver::solveEq18(double* F, const double* Omend,
     long long nyz_ll = Ny1 * Nz1;
     long long total = static_cast<long long>(Ng) * nyz_ll * NmuNom;
     
-    if (d_F_tmp.getSize() < static_cast<size_t>(total)) {
-        d_F_tmp.allocate(static_cast<size_t>(total));
+    if (d_F_pred.getSize() < static_cast<size_t>(total)) {
         d_F_pred.allocate(static_cast<size_t>(total));
         d_flux_old.allocate(static_cast<size_t>(total));
         d_flux_pred.allocate(static_cast<size_t>(total));
@@ -264,18 +253,10 @@ void SpatialTransportSolver::solveEq18(double* F, const double* Omend,
         F,
         d_flux_old.data(),
         d_flux_pred.data(),
-        d_F_tmp.data(),
+        F,
         dt,
         preserve_sign,
         total
     );
     CUDA_CHECK(cudaGetLastError());
-    
-    CUDA_CHECK(cudaMemcpyAsync(
-        F,
-        d_F_tmp.data(),
-        static_cast<size_t>(total) * sizeof(double),
-        cudaMemcpyDeviceToDevice,
-        stream
-    ));
 }

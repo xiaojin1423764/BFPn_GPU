@@ -21,7 +21,6 @@ private:
     // 波数网格
     DeviceArray<double> d_ky, d_kz;
     // 显式有限差分用的临时数组
-    DeviceArray<double> d_F_tmp;
     DeviceArray<double> d_F_pred;
     DeviceArray<double> d_flux_old;
     DeviceArray<double> d_flux_pred;

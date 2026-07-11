@@ -425,10 +425,8 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
     int batch = plane_batch;
     if (batch <= 0) return;
 
-    if (Nom <= 32 && Nmu <= 32) {
-        if (d_F_tmp.getSize() < static_cast<size_t>(total)) {
-            d_F_tmp.allocate(static_cast<size_t>(total));
-        }
+    constexpr int direct_dst_limit = 8;
+    if (Nom <= direct_dst_limit && Nmu <= direct_dst_limit) {
         if (d_dst_coeff.getSize() < static_cast<size_t>(total)) {
             d_dst_coeff.allocate(static_cast<size_t>(total));
         }
@@ -470,7 +468,7 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
         CUDA_CHECK(cudaGetLastError());
         sineInverseKernel<<<grid_size, block_size, 0, stream>>>(
             d_dst_coeff.data(),
-            d_F_tmp.data(),
+            F,
             d_sine_u.data(),
             d_sine_v.data(),
             Nom,
@@ -480,17 +478,11 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
             Ng
         );
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaMemcpyAsync(F, d_F_tmp.data(),
-                                   static_cast<size_t>(total) * sizeof(double),
-                                   cudaMemcpyDeviceToDevice, stream));
         return;
     }
 
     if (Nom <= 128 && Nmu <= 128) {
         const size_t total_size = static_cast<size_t>(total);
-        if (d_F_tmp.getSize() < total_size) {
-            d_F_tmp.allocate(total_size);
-        }
         if (d_sep_tmp1.getSize() < total_size) {
             d_sep_tmp1.allocate(total_size);
         }
@@ -541,14 +533,10 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
         CUDA_CHECK(cudaGetLastError());
 
         separableInverseUKernel<<<grid_size, block_size, 0, stream>>>(
-            d_sep_tmp1.data(), d_F_tmp.data(), d_sine_u.data(),
+            d_sep_tmp1.data(), F, d_sine_u.data(),
             Nom, Nmu, n_angle, batch
         );
         CUDA_CHECK(cudaGetLastError());
-
-        CUDA_CHECK(cudaMemcpyAsync(F, d_F_tmp.data(),
-                                   total_size * sizeof(double),
-                                   cudaMemcpyDeviceToDevice, stream));
         return;
     }
     
