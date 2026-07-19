@@ -130,8 +130,20 @@ def sample_curve(crop: np.ndarray, spec: CurveSpec, points: int) -> tuple[np.nda
     sampled_x = []
     sampled_y = []
     window = panel.xmax / (panel.axis_right - panel.axis_left) * 1.25
+    low_energy_curve = CURVES[(spec.material, 100)]
+    exclusion_pad = panel.xmax / (panel.axis_right - panel.axis_left) * 3.0
+    low_peak_exclusion_start = 0.55 * low_energy_curve.table_bp
 
     for target in targets:
+        # The rasterized 100 MeV rise/drop crosses the 230 MeV branch; bridge
+        # that occluded interval from the nearest uncontaminated green pixels.
+        if (
+            spec.energy == 230
+            and low_peak_exclusion_start
+            <= target
+            <= low_energy_curve.terminal_x + exclusion_pad
+        ):
+            continue
         candidates = py[np.abs(px - target) <= window]
         candidates = candidates[(candidates > 0.035) & (candidates <= 1.02)]
         if candidates.size == 0:
@@ -166,19 +178,8 @@ def sample_curve(crop: np.ndarray, spec: CurveSpec, points: int) -> tuple[np.nda
     y[x_grid > panel.xmax] = 0.0
     y = np.clip(y, 0.0, 1.0)
 
-    if spec.energy == 230:
-        low_branch = x_grid < panel.branch_split
-        low_end = 0.31 if spec.material == "bone" else 0.30
-        y[low_branch] = np.interp(
-            x_grid[low_branch],
-            [0.0, panel.branch_split],
-            [0.25, low_end],
-        )
-        pre_peak = (x_grid >= panel.branch_split) & (x_grid <= spec.table_bp)
-        y[pre_peak] = np.maximum.accumulate(y[pre_peak])
-    else:
-        pre_peak = x_grid <= spec.table_bp
-        y[pre_peak] = np.maximum.accumulate(y[pre_peak])
+    pre_peak = x_grid <= spec.table_bp
+    y[pre_peak] = np.maximum.accumulate(y[pre_peak])
     peak_and_tail = (x_grid >= spec.table_bp) & (x_grid <= spec.terminal_x)
     y[peak_and_tail] = np.minimum.accumulate(y[peak_and_tail])
     y[x_grid > spec.terminal_x] = 0.0
