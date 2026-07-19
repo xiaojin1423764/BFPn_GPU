@@ -79,6 +79,8 @@ int main(int argc, char** argv) {
     bool discrete_angle_delta = false;
     bool normalize_initial_mass = false;
     bool trapezoidal_yz = false;
+    bool dose_catastrophic_loss = true;
+    bool calibrate_cross_sections = false;
     int streaming_lane_chunk = 262144;
     int streaming_energy_chunk = 128;
     int idd_stride = 1;
@@ -176,6 +178,14 @@ int main(int argc, char** argv) {
             normalize_initial_mass = true;
         } else if (arg == "--trapezoidal-yz") {
             trapezoidal_yz = true;
+        } else if (arg == "--dose-catastrophic-loss") {
+            dose_catastrophic_loss = true;
+        } else if (arg == "--stopping-power-dose-only") {
+            dose_catastrophic_loss = false;
+        } else if (arg == "--no-cross-section-calibration") {
+            calibrate_cross_sections = false;
+        } else if (arg == "--legacy-cross-section-calibration") {
+            calibrate_cross_sections = true;
         } else if (arg == "--sigma-yz" && i + 1 < argc) {
             sigma_yz = std::stod(argv[++i]);
         } else if (arg == "--lane-chunk" && i + 1 < argc) {
@@ -225,6 +235,10 @@ int main(int argc, char** argv) {
                       << "  --discrete-angle-delta Use a quadrature-normalized mono-directional beam\n"
                       << "  --normalize-initial-mass Normalize the discrete y/z/u/v/E beam mass\n"
                       << "  --trapezoidal-yz Use trapezoidal y/z weights in normalization and IDD\n"
+                      << "  --dose-catastrophic-loss Include the Eq.24 E*sigma_c*psi dose term (default)\n"
+                      << "  --stopping-power-dose-only Omit the Eq.24 catastrophic-loss dose term\n"
+                      << "  --no-cross-section-calibration Use fitted sigma_c directly (default)\n"
+                      << "  --legacy-cross-section-calibration Apply the legacy empirical sigma_c correction\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
                       << "  --energy-chunk <n> Streaming transport/angle energy chunk (default: 128)\n"
@@ -300,6 +314,8 @@ int main(int argc, char** argv) {
     phys.discrete_angle_delta = discrete_angle_delta;
     phys.normalize_initial_mass = normalize_initial_mass;
     phys.trapezoidal_yz = trapezoidal_yz;
+    phys.dose_catastrophic_loss = dose_catastrophic_loss;
+    phys.calibrate_cross_sections = calibrate_cross_sections;
     phys.streaming_lane_chunk = streaming_lane_chunk;
     phys.streaming_energy_chunk = streaming_energy_chunk;
     phys.streaming_dir = streaming_dir;
@@ -316,6 +332,11 @@ int main(int argc, char** argv) {
               << (discrete_angle_delta ? "discrete-delta" : "sampled-gaussian")
               << ", mass normalization=" << (normalize_initial_mass ? "on" : "off")
               << ", y/z trapezoidal weights=" << (trapezoidal_yz ? "on" : "off")
+              << std::endl;
+    std::cout << "Dose catastrophic-loss term: "
+              << (dose_catastrophic_loss ? "enabled" : "disabled") << std::endl;
+    std::cout << "Cross-section calibration: "
+              << (calibrate_cross_sections ? "legacy empirical correction" : "disabled")
               << std::endl;
     std::cout << "Spatial positivity clipping: "
               << (no_spatial_clipping ? "disabled" : "enabled") << std::endl;

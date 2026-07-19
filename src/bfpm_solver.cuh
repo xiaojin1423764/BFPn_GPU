@@ -51,6 +51,8 @@ struct PhysicsParams {
     bool discrete_angle_delta;
     bool normalize_initial_mass;
     bool trapezoidal_yz;
+    bool dose_catastrophic_loss;
+    bool calibrate_cross_sections;
     int streaming_lane_chunk;
     int streaming_energy_chunk;
     std::string streaming_dir;

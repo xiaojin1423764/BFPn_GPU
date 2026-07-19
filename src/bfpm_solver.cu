@@ -247,6 +247,7 @@ __global__ void integratedDepthDoseKernel(
     double dz,
     double density,
     bool trapezoidal_yz,
+    bool dose_catastrophic_loss,
     size_t total
 ) {
     extern __shared__ double shared[];
@@ -277,11 +278,17 @@ __global__ void integratedDepthDoseKernel(
 
             double S_mid = 0.5 * (S_s[ek] + S_s[ek + 1]);
             double slope_weight = (S_s[ek + 1] - S_s[ek]) / 6.0;
+            double dose = psi1 * S_mid * dg + psi2 * slope_weight * dg;
+            if (dose_catastrophic_loss) {
+                double sigma = max(sigma_c[ek], 0.0);
+                double E_mid = 0.5 * (en[ek] + en[ek + 1]);
+                dose += psi1 * E_mid * sigma * dg
+                      + psi2 * (en[ek + 1] - en[ek]) * sigma * dg / 6.0;
+            }
 
             // Leading dose term: local fluence times stopping power,
             // integrated over energy and angle, then divided by density.
-            sum += yz_weight
-                 * (psi1 * S_mid * dg + psi2 * slope_weight * dg) / density;
+            sum += yz_weight * dose / density;
         }
         idx += stride;
     }
@@ -356,12 +363,21 @@ __global__ void pairDepthDoseLaneKernel(
     const double* F,
     const double* f_F,
     const double* S_s,
+    const double* sigma_c,
+    const double* en,
     double* block_sums,
     int Ng,
     int lanes,
+    int lane_start,
+    int nyz,
+    int NmuNom,
+    int Ny,
+    int Nz,
     double dg,
     double density,
     double quadrature_weight,
+    bool trapezoidal_yz,
+    bool dose_catastrophic_loss,
     size_t total
 ) {
     extern __shared__ double shared[];
@@ -376,9 +392,25 @@ __global__ void pairDepthDoseLaneKernel(
             if (cur >= total) continue;
 
             int ek = static_cast<int>(cur / lanes);
+            int global_lane = lane_start + static_cast<int>(cur % lanes);
+            int spatial = (global_lane / NmuNom) % nyz;
+            int iy = spatial % (Ny + 1);
+            int iz = spatial / (Ny + 1);
+            double yz_weight = 1.0;
+            if (trapezoidal_yz) {
+                if (iy == 0 || iy == Ny) yz_weight *= 0.5;
+                if (iz == 0 || iz == Nz) yz_weight *= 0.5;
+            }
             double S_mid = 0.5 * (S_s[ek] + S_s[ek + 1]);
             double slope_weight = (S_s[ek + 1] - S_s[ek]) / 6.0;
-            sum += (F[cur] * S_mid * dg + f_F[cur] * slope_weight * dg) / density;
+            double dose = F[cur] * S_mid * dg + f_F[cur] * slope_weight * dg;
+            if (dose_catastrophic_loss) {
+                double sigma = max(sigma_c[ek], 0.0);
+                double E_mid = 0.5 * (en[ek] + en[ek + 1]);
+                dose += F[cur] * E_mid * sigma * dg
+                      + f_F[cur] * (en[ek + 1] - en[ek]) * sigma * dg / 6.0;
+            }
+            sum += yz_weight * dose / density;
         }
         idx += stride;
     }
@@ -404,6 +436,8 @@ __global__ void spotDosePlaneKernel(
     const double* F1,
     const double* f_F1,
     const double* S_s,
+    const double* sigma_c,
+    const double* en,
     double* plane,
     int Ng,
     int nyz,
@@ -411,7 +445,8 @@ __global__ void spotDosePlaneKernel(
     double dg,
     double du,
     double dv,
-    double density
+    double density,
+    bool dose_catastrophic_loss
 ) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nyz) return;
@@ -426,7 +461,14 @@ __global__ void spotDosePlaneKernel(
             long long idx = base + a;
             double psi1 = F[idx] + F1[idx];
             double psi2 = f_F[idx] + f_F1[idx];
-            sum += (psi1 * S_mid * dg + psi2 * slope_weight * dg) / density;
+            double dose = psi1 * S_mid * dg + psi2 * slope_weight * dg;
+            if (dose_catastrophic_loss) {
+                double sigma = max(sigma_c[ek], 0.0);
+                double E_mid = 0.5 * (en[ek] + en[ek + 1]);
+                dose += psi1 * E_mid * sigma * dg
+                      + psi2 * (en[ek + 1] - en[ek]) * sigma * dg / 6.0;
+            }
+            sum += dose / density;
         }
     }
     plane[s] = sum * du * dv;
@@ -481,6 +523,8 @@ __global__ void energyFluxKernel(
 __global__ void integratedDepthDoseLiteKernel(
     const double* F,
     const double* S_s,
+    const double* sigma_c,
+    const double* en,
     double* block_sums,
     int Ng,
     int nyz,
@@ -494,6 +538,7 @@ __global__ void integratedDepthDoseLiteKernel(
     double dz,
     double density,
     bool trapezoidal_yz,
+    bool dose_catastrophic_loss,
     size_t total
 ) {
     extern __shared__ double shared[];
@@ -520,7 +565,12 @@ __global__ void integratedDepthDoseLiteKernel(
                 if (iz == 0 || iz == Nz) yz_weight *= 0.5;
             }
             double S_mid = 0.5 * (S_s[ek] + S_s[ek + 1]);
-            sum += yz_weight * F[cur] * S_mid * dg / density;
+            double dose = F[cur] * S_mid * dg;
+            if (dose_catastrophic_loss) {
+                double E_mid = 0.5 * (en[ek] + en[ek + 1]);
+                dose += F[cur] * E_mid * max(sigma_c[ek], 0.0) * dg;
+            }
+            sum += yz_weight * dose / density;
         }
         idx += stride;
     }
@@ -1434,11 +1484,21 @@ void BFPnSolver::initialize(const std::string& data_path) {
               << "Loaded total cross sections: " << sigma_path << " ("
               << sigma_rows << " rows)" << std::endl;
 
-    // 应用修正
-    for (auto& s : h_sigma_c) s *= 0.9;
-    for (int i = 401; i < 444 && i < grid.Ng; i++) {
-        h_sigma_c[i] -= 0.0002 * (0.5 + 0.5 * (i - 401));
+    const std::vector<double> raw_sigma_c = h_sigma_c;
+    if (phys.calibrate_cross_sections) {
+        for (auto& s : h_sigma_c) s *= 0.9;
+        for (int i = 401; i < 444 && i < grid.Ng; i++) {
+            h_sigma_c[i] -= 0.0002 * (0.5 + 0.5 * (i - 401));
+        }
     }
+
+    const int beam_group = std::max(0, std::min(
+        static_cast<int>((phys.beam_energy - 1.0) / grid.dg), grid.Ng - 1));
+    const double beam_group_energy = (beam_group + 0.5) * grid.dg + 1.0;
+    std::cout << "Beam-energy sigma_c: group=" << beam_group
+              << ", E_mid=" << beam_group_energy << " MeV"
+              << ", fitted=" << raw_sigma_c[beam_group]
+              << ", used=" << h_sigma_c[beam_group] << std::endl;
 
     d_mu.copyFromHost(h_mu.data(), grid.Ng * 3);
     d_sigma_c.copyFromHost(h_sigma_c.data(), grid.Ng);
@@ -2464,12 +2524,21 @@ void BFPnSolver::streamingEnergyStep(const std::string& F_path,
                 d_stream_F.data(),
                 d_stream_f_F.data(),
                 d_S_s.data(),
+                d_sigma_c.data(),
+                d_en.data(),
                 d_reduction_sums.data(),
                 active_energy_groups,
                 lanes,
+                static_cast<int>(lane0),
+                static_cast<int>(nyz),
+                static_cast<int>(n_angle),
+                grid.Ny,
+                grid.Nz,
                 grid.dg,
                 phys.density,
                 grid.du * grid.dv * grid.dy * grid.dz,
+                phys.trapezoidal_yz,
+                phys.dose_catastrophic_loss,
                 chunk_size
             );
             CUDA_CHECK(cudaGetLastError());
@@ -2969,9 +3038,13 @@ void BFPnSolver::streamingTransportAngleTransportPairStep(const std::string& F_p
                                       reduction_block_size,
                                       reduction_block_size * sizeof(double), stream>>>(
                 output_F, output_f, d_S_s.data() + e0,
+                d_sigma_c.data() + e0, d_en.data() + e0,
                 d_reduction_sums.data(), ecount, static_cast<int>(per_energy),
+                0, static_cast<int>(nyz), static_cast<int>(n_angle),
+                grid.Ny, grid.Nz,
                 grid.dg, phys.density,
-                grid.du * grid.dv * grid.dy * grid.dz, chunk_size
+                grid.du * grid.dv * grid.dy * grid.dz,
+                phys.trapezoidal_yz, phys.dose_catastrophic_loss, chunk_size
             );
             CUDA_CHECK(cudaGetLastError());
             const double* reduced = reduceDevicePartials(num_blocks, stream);
@@ -3420,6 +3493,7 @@ double BFPnSolver::computeIntegratedDepthDose() {
         grid.dg, grid.du, grid.dv, grid.dy, grid.dz,
         phys.density,
         phys.trapezoidal_yz,
+        phys.dose_catastrophic_loss,
         total
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3467,12 +3541,15 @@ double BFPnSolver::computeIntegratedDepthDoseLite() {
                                     block_size * sizeof(double)>>>(
         d_F.data(),
         d_S_s.data(),
+        d_sigma_c.data(),
+        d_en.data(),
         d_reduction_sums.data(),
         grid.Ng, static_cast<int>(nyz), static_cast<int>(n_angle),
         grid.Ny, grid.Nz,
         grid.dg, grid.du, grid.dv, grid.dy, grid.dz,
         phys.density,
         phys.trapezoidal_yz,
+        phys.dose_catastrophic_loss,
         total
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3493,10 +3570,12 @@ std::vector<double> BFPnSolver::computeSpotDosePlane() {
         d_F.data(), d_f_F.data(),
         d_F1.data(), d_f_F1.data(),
         d_S_s.data(),
+        d_sigma_c.data(), d_en.data(),
         d_spot_plane.data(),
         grid.Ng, nyz, n_angle,
         grid.dg, grid.du, grid.dv,
-        phys.density
+        phys.density,
+        phys.dose_catastrophic_loss
     );
     CUDA_CHECK(cudaGetLastError());
 
@@ -3579,10 +3658,12 @@ void BFPnSolver::saveSpotPlaneStreaming(double requested_depth, double actual_de
             d_stream_F.data(), d_stream_f_F.data(),
             d_stream_F1.data(), d_stream_f_F1.data(),
             d_S_s.data() + e0,
+            d_sigma_c.data() + e0, d_en.data() + e0,
             d_spot_plane.data(),
             ecount, static_cast<int>(nyz), static_cast<int>(n_angle),
             grid.dg, grid.du, grid.dv,
-            phys.density
+            phys.density,
+            phys.dose_catastrophic_loss
         );
         CUDA_CHECK(cudaGetLastError());
         d_spot_plane.copyToHost(h_plane.data(), h_plane.size());
@@ -3713,6 +3794,7 @@ double BFPnSolver::computeIntegratedDepthDoseStreaming() {
             grid.dg, grid.du, grid.dv, grid.dy, grid.dz,
             phys.density,
             phys.trapezoidal_yz,
+            phys.dose_catastrophic_loss,
             chunk_size
         );
         CUDA_CHECK(cudaGetLastError());
