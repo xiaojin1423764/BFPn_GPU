@@ -171,3 +171,52 @@ bone 230 & D20 & 21.1376 & 21.1565 & -0.0189 & -0.089\\
 尤其是 \texttt{8x8-7x7-Nx1000} 的 $\Delta x=0.04\,\mathrm{cm}$，
 \texttt{12x12-9x9-Nx2000} 的 $\Delta x=0.02\,\mathrm{cm}$；
 若改用 cell-center 坐标而不是 step-end 坐标，直接由样本最大值读出的 BP 会整体移动约 $\Delta x/2$。
+
+\subsection*{9.6 water 230 MeV 入口异常逐项复核}
+
+本小节只报告本轮逐项验证的新结果，不把未重跑 case 与旧图混用。论文 Figure 3 的参数为
+$L_y=L_z=8\,\mathrm{cm}$、$L_u=L_v=2$、$\sigma_y=\sigma_z=0.3\,\mathrm{cm}$。
+在离散角 delta、初始相空间质量归一化和 $y/z$ 梯形求积之后，横向和角向加密不再产生原先的入口分叉。
+
+进一步检查发现 water 230 MeV 所在能群的拟合灾变截面为 $0.00325418$，旧经验修正
+$0.9\sigma_c$ 加高能减项后得到 $-0.00127124$，随后在输运和剂量核中被裁剪为零。
+该经验修正在论文中没有给出，且会产生负截面。因此当前默认直接使用拟合截面；
+需要复现旧路径时可使用 \texttt{--legacy-cross-section-calibration}。
+
+论文式剂量还必须包含 Eq.~(24) 的 $E\sigma_{c,t}\psi/\rho$ 灾变损失项。
+在 $N_x=500$ 的逐项 A/B 中，先关闭旧截面修正，再单独加入 Eq.~(24) 项，得到：
+
+\begin{center}
+\begin{tabular}{llrrr}
+\toprule
+material & energy & legacy corrected/stopping only & fitted/stopping only & fitted/full Eq.~(24)\\
+\midrule
+water & 100 MeV & 0.210524 & 0.212645 & 0.242639\\
+water & 230 MeV & 0.185597 & 0.193066 & 0.224220\\
+bone  & 100 MeV & 0.209574 & 0.211544 & 0.264595\\
+bone  & 230 MeV & 0.178099 & 0.183599 & 0.245103\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+四个 case 的入口均向 Figure 3 移动；BP/P90/D90/D20 的最大变化为 $0.0274\,\mathrm{cm}$，
+没有引入新的射程退化。Eq.~(24) 完整剂量和拟合截面现为默认路径；
+\texttt{--stopping-power-dose-only} 可用于复现旧剂量定义。
+
+最后使用相同 $N_x=1000$ 比较允许范围内的两个小网格：
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+grid & normalized entrance & BP cm & P90 cm & D90 cm & D20 cm\\
+\midrule
+$8\times8/7\times7$   & 0.218797 & 32.5600 & 32.3066 & 32.7443 & 33.2153\\
+$12\times12/9\times9$ & 0.218867 & 32.5600 & 32.3051 & 32.7437 & 33.2150\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+两网格入口差为 $6.94\times10^{-5}$，normalized-curve L2 差为 $0.00412$。
+Figure 3 脚本删除了把 230 MeV 入口强制设为 $0.25$ 的直线覆盖；从绿色像素直接提取的
+water 230 MeV 入口为 $0.23529$。因此最终小网格结果仍低约 $0.0165$，但原先的细网格入口偏高和
+粗细网格不一致现象已经消失，且 Table~2 的四个位置误差均小于 $0.9\%$。
