@@ -56,6 +56,8 @@ int main(int argc, char** argv) {
     int nom = DefaultGrid::NOM;
     double ly = DefaultGrid::LY;
     double lz = DefaultGrid::LZ;
+    double lu = DefaultGrid::LU;
+    double lv = DefaultGrid::LV;
     double beam_energy = 230.0;
     double sigma_e = 1.0;
     double sigma_yz = 0.1;
@@ -103,6 +105,10 @@ int main(int argc, char** argv) {
             ly = std::stod(argv[++i]);
         } else if (arg == "--lz" && i + 1 < argc) {
             lz = std::stod(argv[++i]);
+        } else if (arg == "--lu" && i + 1 < argc) {
+            lu = std::stod(argv[++i]);
+        } else if (arg == "--lv" && i + 1 < argc) {
+            lv = std::stod(argv[++i]);
         } else if (arg == "--ng" && i + 1 < argc) {
             ng = std::stoi(argv[++i]);
         } else if (arg == "--nmu" && i + 1 < argc) {
@@ -189,6 +195,8 @@ int main(int argc, char** argv) {
                       << "  --nz <value>     Z grid cells (paper Figure 3 uses 80)\n"
                       << "  --ly <cm>        Y domain width (default: " << DefaultGrid::LY << ")\n"
                       << "  --lz <cm>        Z domain width (default: " << DefaultGrid::LZ << ")\n"
+                      << "  --lu <value>     U angular domain width (default: " << DefaultGrid::LU << ")\n"
+                      << "  --lv <value>     V angular domain width (default: " << DefaultGrid::LV << ")\n"
                       << "  --ng <value>     Energy groups (paper Figure 3 uses 500)\n"
                       << "  --nmu <value>    Angular u grid points (paper Figure 3 uses 20)\n"
                       << "  --nom <value>    Angular v grid points (paper Figure 3 uses 20)\n"
@@ -250,8 +258,8 @@ int main(int argc, char** argv) {
     grid.Lx = DefaultGrid::LX;
     grid.Ly = ly;
     grid.Lz = lz;
-    grid.Lu = DefaultGrid::LU;
-    grid.Lv = DefaultGrid::LV;
+    grid.Lu = lu;
+    grid.Lv = lv;
     grid.Lg = DefaultGrid::LG;
     
     // 配置物理参数
@@ -284,6 +292,11 @@ int main(int argc, char** argv) {
     phys.spot_prefix = spot_prefix;
     phys.idd_stride = idd_stride;
 
+    std::cout << "Domain widths: Lx=" << grid.Lx
+              << ", Ly=" << grid.Ly << ", Lz=" << grid.Lz
+              << ", Lu=" << grid.Lu << ", Lv=" << grid.Lv << std::endl;
+    std::cout << "Initial beam sigmas: yz=" << sigma_yz
+              << " cm, E=" << sigma_e << " MeV, angular=1e-6" << std::endl;
     std::cout << "Spatial positivity clipping: "
               << (no_spatial_clipping ? "disabled" : "enabled") << std::endl;
     
