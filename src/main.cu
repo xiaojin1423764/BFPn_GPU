@@ -76,6 +76,9 @@ int main(int argc, char** argv) {
     bool no_zero_chunk_skip = false;
     bool no_fused_stream_boundary = false;
     bool profile_steps = false;
+    bool discrete_angle_delta = false;
+    bool normalize_initial_mass = false;
+    bool trapezoidal_yz = false;
     int streaming_lane_chunk = 262144;
     int streaming_energy_chunk = 128;
     int idd_stride = 1;
@@ -167,6 +170,12 @@ int main(int argc, char** argv) {
             no_fused_stream_boundary = true;
         } else if (arg == "--profile-steps") {
             profile_steps = true;
+        } else if (arg == "--discrete-angle-delta") {
+            discrete_angle_delta = true;
+        } else if (arg == "--normalize-initial-mass") {
+            normalize_initial_mass = true;
+        } else if (arg == "--trapezoidal-yz") {
+            trapezoidal_yz = true;
         } else if (arg == "--sigma-yz" && i + 1 < argc) {
             sigma_yz = std::stod(argv[++i]);
         } else if (arg == "--lane-chunk" && i + 1 < argc) {
@@ -213,6 +222,9 @@ int main(int argc, char** argv) {
                       << "  --no-zero-chunk-skip Disable inactive high-energy chunk skipping\n"
                       << "  --no-fused-stream-boundary Disable fused transport/second-energy pass\n"
                       << "  --profile-steps  Print energy/transport/angle step timing summary\n"
+                      << "  --discrete-angle-delta Use a quadrature-normalized mono-directional beam\n"
+                      << "  --normalize-initial-mass Normalize the discrete y/z/u/v/E beam mass\n"
+                      << "  --trapezoidal-yz Use trapezoidal y/z weights in normalization and IDD\n"
                       << "  --sigma-yz <cm>  Initial transverse Gaussian sigma (default: 0.1; paper spot figures use 0.3)\n"
                       << "  --lane-chunk <n> Streaming energy lane chunk (default: 262144)\n"
                       << "  --energy-chunk <n> Streaming transport/angle energy chunk (default: 128)\n"
@@ -285,6 +297,9 @@ int main(int argc, char** argv) {
     phys.no_zero_chunk_skip = no_zero_chunk_skip;
     phys.no_fused_stream_boundary = no_fused_stream_boundary;
     phys.profile_steps = profile_steps;
+    phys.discrete_angle_delta = discrete_angle_delta;
+    phys.normalize_initial_mass = normalize_initial_mass;
+    phys.trapezoidal_yz = trapezoidal_yz;
     phys.streaming_lane_chunk = streaming_lane_chunk;
     phys.streaming_energy_chunk = streaming_energy_chunk;
     phys.streaming_dir = streaming_dir;
@@ -297,6 +312,11 @@ int main(int argc, char** argv) {
               << ", Lu=" << grid.Lu << ", Lv=" << grid.Lv << std::endl;
     std::cout << "Initial beam sigmas: yz=" << sigma_yz
               << " cm, E=" << sigma_e << " MeV, angular=1e-6" << std::endl;
+    std::cout << "Initial quadrature: angle="
+              << (discrete_angle_delta ? "discrete-delta" : "sampled-gaussian")
+              << ", mass normalization=" << (normalize_initial_mass ? "on" : "off")
+              << ", y/z trapezoidal weights=" << (trapezoidal_yz ? "on" : "off")
+              << std::endl;
     std::cout << "Spatial positivity clipping: "
               << (no_spatial_clipping ? "disabled" : "enabled") << std::endl;
     

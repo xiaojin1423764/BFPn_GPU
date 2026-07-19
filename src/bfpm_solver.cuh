@@ -48,6 +48,9 @@ struct PhysicsParams {
     bool no_zero_chunk_skip;
     bool no_fused_stream_boundary;
     bool profile_steps;
+    bool discrete_angle_delta;
+    bool normalize_initial_mass;
+    bool trapezoidal_yz;
     int streaming_lane_chunk;
     int streaming_energy_chunk;
     std::string streaming_dir;

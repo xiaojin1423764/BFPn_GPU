@@ -238,12 +238,15 @@ __global__ void integratedDepthDoseKernel(
     int Ng,
     int nyz,
     int NmuNom,
+    int Ny,
+    int Nz,
     double dg,
     double du,
     double dv,
     double dy,
     double dz,
     double density,
+    bool trapezoidal_yz,
     size_t total
 ) {
     extern __shared__ double shared[];
@@ -260,6 +263,15 @@ __global__ void integratedDepthDoseKernel(
             if (cur >= total) continue;
 
             int ek = static_cast<int>(cur / n_per_E);
+            long long local = static_cast<long long>(cur % n_per_E);
+            int spatial = static_cast<int>(local / NmuNom);
+            int iy = spatial % (Ny + 1);
+            int iz = spatial / (Ny + 1);
+            double yz_weight = 1.0;
+            if (trapezoidal_yz) {
+                if (iy == 0 || iy == Ny) yz_weight *= 0.5;
+                if (iz == 0 || iz == Nz) yz_weight *= 0.5;
+            }
             double psi1 = F[cur] + F1[cur];
             double psi2 = f_F[cur] + f_F1[cur];
 
@@ -268,7 +280,8 @@ __global__ void integratedDepthDoseKernel(
 
             // Leading dose term: local fluence times stopping power,
             // integrated over energy and angle, then divided by density.
-            sum += (psi1 * S_mid * dg + psi2 * slope_weight * dg) / density;
+            sum += yz_weight
+                 * (psi1 * S_mid * dg + psi2 * slope_weight * dg) / density;
         }
         idx += stride;
     }
@@ -472,12 +485,15 @@ __global__ void integratedDepthDoseLiteKernel(
     int Ng,
     int nyz,
     int NmuNom,
+    int Ny,
+    int Nz,
     double dg,
     double du,
     double dv,
     double dy,
     double dz,
     double density,
+    bool trapezoidal_yz,
     size_t total
 ) {
     extern __shared__ double shared[];
@@ -494,8 +510,17 @@ __global__ void integratedDepthDoseLiteKernel(
             if (cur >= total) continue;
 
             int ek = static_cast<int>(cur / n_per_E);
+            long long local = static_cast<long long>(cur % n_per_E);
+            int spatial = static_cast<int>(local / NmuNom);
+            int iy = spatial % (Ny + 1);
+            int iz = spatial / (Ny + 1);
+            double yz_weight = 1.0;
+            if (trapezoidal_yz) {
+                if (iy == 0 || iy == Ny) yz_weight *= 0.5;
+                if (iz == 0 || iz == Nz) yz_weight *= 0.5;
+            }
             double S_mid = 0.5 * (S_s[ek] + S_s[ek + 1]);
-            sum += F[cur] * S_mid * dg / density;
+            sum += yz_weight * F[cur] * S_mid * dg / density;
         }
         idx += stride;
     }
@@ -932,7 +957,13 @@ __global__ void initializeLiteDistributionKernel(
     double sig_E,
     double beam_energy,
     double omega1_abs_center,
-    double omega2_abs_center
+    double omega2_abs_center,
+    int omega1_center_count,
+    int omega2_center_count,
+    double du,
+    double dv,
+    bool discrete_angle_delta,
+    double initial_scale
 ) {
     long long nyz = static_cast<long long>(Ny + 1) * (Nz + 1);
     long long total = static_cast<long long>(Ng) * nyz * NmuNom;
@@ -954,12 +985,18 @@ __global__ void initializeLiteDistributionKernel(
 
     double domega1 = fabs(omega1) - omega1_abs_center;
     double domega2 = fabs(omega2) - omega2_abs_center;
-    double f1 = exp(-(a_1 * y * y + a_2 * domega1 * domega1))
-              * exp(-(a_1 * z * z + a_2 * domega2 * domega2));
+    double angular = exp(-a_2 * (domega1 * domega1 + domega2 * domega2));
+    if (discrete_angle_delta) {
+        bool selected = fabs(domega1) < 0.25 * dv && fabs(domega2) < 0.25 * du;
+        angular = selected
+            ? 1.0 / (omega1_center_count * omega2_center_count * du * dv)
+            : 0.0;
+    }
+    double f1 = exp(-a_1 * (y * y + z * z)) * angular;
     double f2 = 1.0 / sqrt(2.0 * Physics::PI) / sig_E
               * exp(-pow((E - beam_energy) / sig_E / sqrt(2.0), 2));
 
-    F[gid] = f1 * f2;
+    F[gid] = initial_scale * f1 * f2;
 }
 
 __global__ void initializeStreamingDistributionKernel(
@@ -981,7 +1018,13 @@ __global__ void initializeStreamingDistributionKernel(
     double sig_E,
     double beam_energy,
     double omega1_abs_center,
-    double omega2_abs_center
+    double omega2_abs_center,
+    int omega1_center_count,
+    int omega2_center_count,
+    double du,
+    double dv,
+    bool discrete_angle_delta,
+    double initial_scale
 ) {
     long long nyz = static_cast<long long>(Ny + 1) * (Nz + 1);
     long long chunk_total = static_cast<long long>(energy_count) * nyz * NmuNom;
@@ -1006,12 +1049,18 @@ __global__ void initializeStreamingDistributionKernel(
 
     double domega1 = fabs(omega1) - omega1_abs_center;
     double domega2 = fabs(omega2) - omega2_abs_center;
-    double f1 = exp(-(a_1 * y * y + a_2 * domega1 * domega1))
-              * exp(-(a_1 * z * z + a_2 * domega2 * domega2));
+    double angular = exp(-a_2 * (domega1 * domega1 + domega2 * domega2));
+    if (discrete_angle_delta) {
+        bool selected = fabs(domega1) < 0.25 * dv && fabs(domega2) < 0.25 * du;
+        angular = selected
+            ? 1.0 / (omega1_center_count * omega2_center_count * du * dv)
+            : 0.0;
+    }
+    double f1 = exp(-a_1 * (y * y + z * z)) * angular;
     double f2 = 1.0 / sqrt(2.0 * Physics::PI) / sig_E
               * exp(-pow((E - beam_energy) / sig_E / sqrt(2.0), 2));
 
-    F[gid] = f1 * f2;
+    F[gid] = initial_scale * f1 * f2;
 }
 
 void GridParams::computeDeltas() {
@@ -1717,6 +1766,62 @@ void BFPnSolver::initializeDistribution() {
         omega2_abs_center = std::min(omega2_abs_center, std::abs(u));
     }
 
+    int omega1_center_count = 0;
+    int omega2_center_count = 0;
+    double angular_mass = 0.0;
+    for (int j = 0; j < grid.Nmu; ++j) {
+        double v = -0.5 * grid.Lv + (j + 1) * grid.dv;
+        double delta = std::abs(v) - omega1_abs_center;
+        if (std::abs(delta) < 0.25 * grid.dv) {
+            ++omega1_center_count;
+        }
+        for (int i = 0; i < grid.Nom; ++i) {
+            double u = -0.5 * grid.Lu + (i + 1) * grid.du;
+            double delta_u = std::abs(u) - omega2_abs_center;
+            angular_mass += std::exp(-phys.a_2 * (delta * delta + delta_u * delta_u))
+                          * grid.du * grid.dv;
+        }
+    }
+    for (int i = 0; i < grid.Nom; ++i) {
+        double u = -0.5 * grid.Lu + (i + 1) * grid.du;
+        if (std::abs(std::abs(u) - omega2_abs_center) < 0.25 * grid.du) {
+            ++omega2_center_count;
+        }
+    }
+    if (phys.discrete_angle_delta) {
+        angular_mass = 1.0;
+    }
+
+    double spatial_mass = 0.0;
+    for (int j = 0; j <= grid.Nz; ++j) {
+        double z = -0.5 * grid.Lz + j * grid.dz;
+        double wz = phys.trapezoidal_yz && (j == 0 || j == grid.Nz) ? 0.5 : 1.0;
+        for (int i = 0; i <= grid.Ny; ++i) {
+            double y = -0.5 * grid.Ly + i * grid.dy;
+            double wy = phys.trapezoidal_yz && (i == 0 || i == grid.Ny) ? 0.5 : 1.0;
+            spatial_mass += wy * wz * std::exp(-phys.a_1 * (y * y + z * z));
+        }
+    }
+    spatial_mass *= grid.dy * grid.dz;
+
+    double energy_mass = 0.0;
+    for (int ek = 0; ek < grid.Ng; ++ek) {
+        double E = (ek + 0.5) * grid.dg + 1.0;
+        energy_mass += 1.0 / std::sqrt(2.0 * Physics::PI) / phys.sig_E
+                     * std::exp(-std::pow((E - phys.beam_energy)
+                                         / phys.sig_E / std::sqrt(2.0), 2));
+    }
+    energy_mass *= grid.dg;
+
+    double initial_mass = spatial_mass * angular_mass * energy_mass;
+    if (!(initial_mass > 0.0) || !std::isfinite(initial_mass)) {
+        throw std::runtime_error("Initial beam has invalid discrete phase-space mass");
+    }
+    double initial_scale = phys.normalize_initial_mass ? 1.0 / initial_mass : 1.0;
+    std::cout << "Initial discrete masses: spatial=" << spatial_mass
+              << ", angular=" << angular_mass << ", energy=" << energy_mass
+              << ", scale=" << initial_scale << std::endl;
+
     if (phys.lite_memory) {
         size_t total = nyz * grid.Ng * n_angle;
         constexpr int block_size = 256;
@@ -1738,7 +1843,13 @@ void BFPnSolver::initializeDistribution() {
             phys.sig_E,
             phys.beam_energy,
             omega1_abs_center,
-            omega2_abs_center
+            omega2_abs_center,
+            omega1_center_count,
+            omega2_center_count,
+            grid.du,
+            grid.dv,
+            phys.discrete_angle_delta,
+            initial_scale
         );
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -1774,7 +1885,13 @@ void BFPnSolver::initializeDistribution() {
                 phys.sig_E,
                 phys.beam_energy,
                 omega1_abs_center,
-                omega2_abs_center
+                omega2_abs_center,
+                omega1_center_count,
+                omega2_center_count,
+                grid.du,
+                grid.dv,
+                phys.discrete_angle_delta,
+                initial_scale
             );
             CUDA_CHECK(cudaGetLastError());
             size_t host_offset = static_cast<size_t>(e0) * nyz * n_angle;
@@ -1814,8 +1931,18 @@ void BFPnSolver::initializeDistribution() {
 
                 double domega1 = std::abs(omega1) - omega1_abs_center;
                 double domega2 = std::abs(omega2) - omega2_abs_center;
-                double f1 = exp(-(phys.a_1 * y * y + phys.a_2 * domega1 * domega1))
-                          * exp(-(phys.a_1 * z * z + phys.a_2 * domega2 * domega2));
+                double angular = std::exp(-phys.a_2
+                    * (domega1 * domega1 + domega2 * domega2));
+                if (phys.discrete_angle_delta) {
+                    bool selected = std::abs(domega1) < 0.25 * grid.dv
+                                 && std::abs(domega2) < 0.25 * grid.du;
+                    angular = selected
+                        ? 1.0 / (omega1_center_count * omega2_center_count
+                                 * grid.du * grid.dv)
+                        : 0.0;
+                }
+                double f1 = initial_scale
+                          * std::exp(-phys.a_1 * (y * y + z * z)) * angular;
 
                 // 初始化能量分布 (高斯)
                 for (int ek = 0; ek < grid.Ng; ek++) {
@@ -3289,8 +3416,10 @@ double BFPnSolver::computeIntegratedDepthDose() {
         d_S_s.data(), d_sigma_c.data(), d_en.data(),
         d_reduction_sums.data(),
         grid.Ng, static_cast<int>(nyz), static_cast<int>(n_angle),
+        grid.Ny, grid.Nz,
         grid.dg, grid.du, grid.dv, grid.dy, grid.dz,
         phys.density,
+        phys.trapezoidal_yz,
         total
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3340,8 +3469,10 @@ double BFPnSolver::computeIntegratedDepthDoseLite() {
         d_S_s.data(),
         d_reduction_sums.data(),
         grid.Ng, static_cast<int>(nyz), static_cast<int>(n_angle),
+        grid.Ny, grid.Nz,
         grid.dg, grid.du, grid.dv, grid.dy, grid.dz,
         phys.density,
+        phys.trapezoidal_yz,
         total
     );
     CUDA_CHECK(cudaGetLastError());
@@ -3578,8 +3709,10 @@ double BFPnSolver::computeIntegratedDepthDoseStreaming() {
             d_S_s.data() + e0, d_sigma_c.data() + e0, d_en.data() + e0,
             d_reduction_sums.data(),
             ecount, static_cast<int>(nyz), static_cast<int>(n_angle),
+            grid.Ny, grid.Nz,
             grid.dg, grid.du, grid.dv, grid.dy, grid.dz,
             phys.density,
+            phys.trapezoidal_yz,
             chunk_size
         );
         CUDA_CHECK(cudaGetLastError());
