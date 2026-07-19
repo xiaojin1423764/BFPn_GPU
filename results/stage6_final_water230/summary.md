@@ -1,5 +1,7 @@
 # Water 230 MeV final entrance validation
 
+![Final water 230 MeV IDD comparison](water230_final_idd.png)
+
 Strict settings use `Ly=Lz=8`, `Lu=Lv=2`, `sigma_yz=0.3`, a normalized
 discrete angular delta, normalized initial phase-space mass, trapezoidal
 transverse quadrature, the fitted `sigma_c` values without the legacy
