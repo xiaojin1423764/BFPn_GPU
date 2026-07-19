@@ -14,9 +14,8 @@ Implemented at prototype level:
 - CUDA memory wrappers and solver orchestration.
 - Primary and secondary proton arrays.
 - Angular diffusion step using the zero-boundary sine-series/DST-I
-  discretization from Eq. `(20)`-`(21)`; small angular grids use direct sine
-  sums, medium grids use separable DST kernels, and larger grids fall back to
-  the odd-extension FFT path.
+  discretization from Eq. `(20)`-`(21)`; all angular grid sizes use the
+  separable real DST kernel path.
 - Spatial transport step using the Eq. `(22)` MUSCL limiter with a
   fully explicit predictor-corrector depth update.
 - Eq. `(15)` DG/CN energy step for `psi_g^1` and `psi_g^2`, including stopping
@@ -446,8 +445,7 @@ ncu --target-processes all --set basic \
   ./build/bin/bfp_solver 100 --data data --time 0.4 --nmu 64 --nom 64
 ```
 
-Current profiling conclusion: for larger angular grids, the optimized angle path
-is the separable real DST branch, which avoids the previous very slow
-odd-extension FFT fallback for `Nmu,Nom <= 128`. Further angle work should focus
-on improving the separable DST kernels or replacing the large-grid fallback with
-a verified batched DST/FFT implementation.
+Current profiling conclusion: the angle path is the separable real DST branch
+for all angular grid sizes. Further angle work should focus on improving these
+kernels or replacing the implementation with a verified library-backed batched
+DST path while preserving the same zero-boundary semantics.

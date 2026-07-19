@@ -14,9 +14,6 @@ def load_idd(path):
         raise ValueError(f"{path} must contain at least two columns: depth and IDD")
     x = data[:, 0]
     y = data[:, 1]
-    if x.size > 0 and x[0] > 0.0:
-        x = np.insert(x, 0, 0.0)
-        y = np.insert(y, 0, y[0])
     return x, y
 
 

@@ -425,159 +425,22 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
     int batch = plane_batch;
     if (batch <= 0) return;
 
-    constexpr int direct_dst_limit = 8;
-    if (Nom <= direct_dst_limit && Nmu <= direct_dst_limit) {
-        if (d_dst_coeff.getSize() < static_cast<size_t>(total)) {
-            d_dst_coeff.allocate(static_cast<size_t>(total));
-        }
-        if (d_sine_coeff.getSize() < static_cast<size_t>(Ng) * n_angle) {
-            d_sine_coeff.allocate(static_cast<size_t>(Ng) * n_angle);
-        }
-        if (d_diffusion_factor.getSize() < static_cast<size_t>(Ng) * n_angle) {
-            d_diffusion_factor.allocate(static_cast<size_t>(Ng) * n_angle);
-        }
-        buildDiffusionFactorKernel<<<(Ng * n_angle + 255) / 256, 256, 0, stream>>>(
-            d_diffusion_factor.data(), sig_trg,
-            Nom, Nmu, n_angle, Ng, cached_du, cached_dv, dt, density
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        double norm = 4.0 / ((Nom + 1.0) * (Nmu + 1.0));
-        complexToRealKernel<<<(Ng * n_angle + 255) / 256, 256, 0, stream>>>(
-            d_sine_coeff.data(),
-            d_diffusion_factor.data(),
-            norm,
-            Ng * n_angle
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        int block_size = 256;
-        int grid_size = (total + block_size - 1) / block_size;
-        sineForwardKernel<<<grid_size, block_size, 0, stream>>>(
-            F,
-            d_dst_coeff.data(),
-            d_sine_coeff.data(),
-            d_sine_u.data(),
-            d_sine_v.data(),
-            Nom,
-            Nmu,
-            n_angle,
-            nyz,
-            Ng
-        );
-        CUDA_CHECK(cudaGetLastError());
-        sineInverseKernel<<<grid_size, block_size, 0, stream>>>(
-            d_dst_coeff.data(),
-            F,
-            d_sine_u.data(),
-            d_sine_v.data(),
-            Nom,
-            Nmu,
-            n_angle,
-            nyz,
-            Ng
-        );
-        CUDA_CHECK(cudaGetLastError());
-        return;
+    const size_t total_size = static_cast<size_t>(total);
+    if (d_sep_tmp1.getSize() < total_size) {
+        d_sep_tmp1.allocate(total_size);
     }
-
-    if (Nom <= 128 && Nmu <= 128) {
-        const size_t total_size = static_cast<size_t>(total);
-        if (d_sep_tmp1.getSize() < total_size) {
-            d_sep_tmp1.allocate(total_size);
-        }
-        if (d_sep_tmp2.getSize() < total_size) {
-            d_sep_tmp2.allocate(total_size);
-        }
-        if (d_sine_coeff.getSize() < static_cast<size_t>(Ng) * n_angle) {
-            d_sine_coeff.allocate(static_cast<size_t>(Ng) * n_angle);
-        }
-        if (d_diffusion_factor.getSize() < static_cast<size_t>(Ng) * n_angle) {
-            d_diffusion_factor.allocate(static_cast<size_t>(Ng) * n_angle);
-        }
-
-        int block_size = 256;
-        int grid_size = (total + block_size - 1) / block_size;
-        buildDiffusionFactorKernel<<<(Ng * n_angle + block_size - 1) / block_size,
-                                     block_size, 0, stream>>>(
-            d_diffusion_factor.data(), sig_trg,
-            Nom, Nmu, n_angle, Ng, cached_du, cached_dv, dt, density
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        double norm = 4.0 / ((Nom + 1.0) * (Nmu + 1.0));
-        complexToRealKernel<<<(Ng * n_angle + block_size - 1) / block_size,
-                              block_size, 0, stream>>>(
-            d_sine_coeff.data(),
-            d_diffusion_factor.data(),
-            norm,
-            Ng * n_angle
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        separableForwardUKernel<<<grid_size, block_size, 0, stream>>>(
-            F, d_sep_tmp1.data(), d_sine_u.data(), Nom, Nmu, n_angle, batch
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        separableForwardVFactorKernel<<<grid_size, block_size, 0, stream>>>(
-            d_sep_tmp1.data(), d_sep_tmp2.data(), d_sine_v.data(),
-            d_sine_coeff.data(), Nom, Nmu, n_angle, nyz, batch
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        separableInverseVKernel<<<grid_size, block_size, 0, stream>>>(
-            d_sep_tmp2.data(), d_sep_tmp1.data(), d_sine_v.data(),
-            Nom, Nmu, n_angle, batch
-        );
-        CUDA_CHECK(cudaGetLastError());
-
-        separableInverseUKernel<<<grid_size, block_size, 0, stream>>>(
-            d_sep_tmp1.data(), F, d_sine_u.data(),
-            Nom, Nmu, n_angle, batch
-        );
-        CUDA_CHECK(cudaGetLastError());
-        return;
+    if (d_sep_tmp2.getSize() < total_size) {
+        d_sep_tmp2.allocate(total_size);
     }
-    
-    if (planned_batch != batch || planned_ng != Ng || planned_nyz != nyz) {
-        if (plan_forward) cufftDestroy(plan_forward);
-        if (plan_inverse) cufftDestroy(plan_inverse);
-
-        int rank = 2;
-        int n[] = {extended_nmu, extended_nom};
-        int inembed[] = {extended_nmu, extended_nom};
-        int onembed[] = {extended_nmu, extended_nom};
-        int istride = 1;
-        int ostride = 1;
-        int idist = extended_angle;
-        int odist = extended_angle;
-
-        CUFFT_CHECK(cufftPlanMany(&plan_forward, rank, n,
-                                  inembed, istride, idist,
-                                  onembed, ostride, odist,
-                                  CUFFT_Z2Z, batch));
-        CUFFT_CHECK(cufftPlanMany(&plan_inverse, rank, n,
-                                  inembed, istride, idist,
-                                  onembed, ostride, odist,
-                                  CUFFT_Z2Z, batch));
-
-        d_fft_buffer.allocate(static_cast<size_t>(batch) * extended_angle);
-        d_sine_buffer.allocate(static_cast<size_t>(batch) * extended_angle);
+    if (d_sine_coeff.getSize() < static_cast<size_t>(Ng) * n_angle) {
+        d_sine_coeff.allocate(static_cast<size_t>(Ng) * n_angle);
+    }
+    if (d_diffusion_factor.getSize() < static_cast<size_t>(Ng) * n_angle) {
         d_diffusion_factor.allocate(static_cast<size_t>(Ng) * n_angle);
-        planned_batch = batch;
-        planned_ng = Ng;
-        planned_nyz = nyz;
     }
-
-    cufftSetStream(plan_forward, stream);
-    cufftSetStream(plan_inverse, stream);
 
     int block_size = 256;
     int grid_size = (total + block_size - 1) / block_size;
-    long long ext_total = static_cast<long long>(batch) * extended_angle;
-    int ext_grid_size = static_cast<int>((ext_total + block_size - 1) / block_size);
-
     buildDiffusionFactorKernel<<<(Ng * n_angle + block_size - 1) / block_size,
                                  block_size, 0, stream>>>(
         d_diffusion_factor.data(), sig_trg,
@@ -585,33 +448,36 @@ void AngleDiffusionSolver::solveEq19(double* F, const double* sig_trg,
     );
     CUDA_CHECK(cudaGetLastError());
 
-    zeroComplexKernel<<<ext_grid_size, block_size, 0, stream>>>(
-        d_fft_buffer.data(), ext_total
+    double norm = 4.0 / ((Nom + 1.0) * (Nmu + 1.0));
+    complexToRealKernel<<<(Ng * n_angle + block_size - 1) / block_size,
+                          block_size, 0, stream>>>(
+        d_sine_coeff.data(),
+        d_diffusion_factor.data(),
+        norm,
+        Ng * n_angle
     );
     CUDA_CHECK(cudaGetLastError());
 
-    packOddExtensionKernel<<<grid_size, block_size, 0, stream>>>(
-        d_fft_buffer.data(), F, Nom, Nmu, extended_nom, extended_nmu, batch
+    separableForwardUKernel<<<grid_size, block_size, 0, stream>>>(
+        F, d_sep_tmp1.data(), d_sine_u.data(), Nom, Nmu, n_angle, batch
     );
     CUDA_CHECK(cudaGetLastError());
 
-    CUFFT_CHECK(cufftExecZ2Z(
-        plan_forward, d_fft_buffer.data(), d_fft_buffer.data(), CUFFT_FORWARD
-    ));
-
-    multiplyOddSineModesKernel<<<grid_size, block_size, 0, stream>>>(
-        d_fft_buffer.data(), d_diffusion_factor.data(), Nom, Nmu,
-        extended_nom, extended_nmu, n_angle, nyz, batch
+    separableForwardVFactorKernel<<<grid_size, block_size, 0, stream>>>(
+        d_sep_tmp1.data(), d_sep_tmp2.data(), d_sine_v.data(),
+        d_sine_coeff.data(), Nom, Nmu, n_angle, nyz, batch
     );
     CUDA_CHECK(cudaGetLastError());
 
-    CUFFT_CHECK(cufftExecZ2Z(
-        plan_inverse, d_fft_buffer.data(), d_fft_buffer.data(), CUFFT_INVERSE
-    ));
+    separableInverseVKernel<<<grid_size, block_size, 0, stream>>>(
+        d_sep_tmp2.data(), d_sep_tmp1.data(), d_sine_v.data(),
+        Nom, Nmu, n_angle, batch
+    );
+    CUDA_CHECK(cudaGetLastError());
 
-    double scale = 1.0 / static_cast<double>(extended_angle);
-    unpackOddExtensionKernel<<<grid_size, block_size, 0, stream>>>(
-        F, d_fft_buffer.data(), Nom, Nmu, extended_nom, extended_nmu, batch, scale
+    separableInverseUKernel<<<grid_size, block_size, 0, stream>>>(
+        d_sep_tmp1.data(), F, d_sine_u.data(),
+        Nom, Nmu, n_angle, batch
     );
     CUDA_CHECK(cudaGetLastError());
 }

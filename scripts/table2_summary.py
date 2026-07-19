@@ -14,6 +14,14 @@ DEFAULT_CASES = [
     ("bone", 100, "results/eq15_strict_fine_bone_100/idd_output.txt"),
     ("bone", 230, "results/eq15_strict_fine_bone_230/idd_output.txt"),
 ]
+TABLE2_CASES = [
+    ("water", 50),
+    ("water", 100),
+    ("water", 230),
+    ("bone", 50),
+    ("bone", 100),
+    ("bone", 230),
+]
 
 
 def case_rows(material: str, energy: int, path: Path) -> list[dict[str, object]]:
@@ -73,10 +81,38 @@ def main() -> int:
         default="results/table2_validation/table2_summary.md",
         help="Markdown output path",
     )
+    parser.add_argument(
+        "--results-root",
+        help="read standard case outputs from ROOT/<material>_<energy>/idd_output.txt",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        nargs=3,
+        metavar=("MATERIAL", "ENERGY", "IDD"),
+        help="explicit case to include; may be passed multiple times",
+    )
     args = parser.parse_args()
 
+    if args.results_root and args.case:
+        parser.error("--results-root and --case are mutually exclusive")
+
+    if args.results_root:
+        root = Path(args.results_root)
+        cases = [
+            (material, energy, root / f"{material}_{energy}" / "idd_output.txt")
+            for material, energy in TABLE2_CASES
+        ]
+    elif args.case:
+        cases = [
+            (material, int(energy), Path(path))
+            for material, energy, path in args.case
+        ]
+    else:
+        cases = DEFAULT_CASES
+
     rows = []
-    for material, energy, path in DEFAULT_CASES:
+    for material, energy, path in cases:
         rows.extend(case_rows(material, energy, Path(path)))
 
     write_csv(rows, Path(args.csv))

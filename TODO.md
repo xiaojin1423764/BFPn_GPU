@@ -3,9 +3,8 @@
 ## Highest Priority
 
 - [ ] Optimize angular sine-series/DST implementation.
-  - Current Eq. `(21)` path uses direct global-memory sine transforms for
-    `Nmu,Nom <= 8`, separable real DST kernels for `Nmu,Nom <= 128`, and an
-    odd-extension FFT fallback above that range.
+  - Current Eq. `(21)` path uses separable real DST kernels for all angular
+    grid sizes.
   - Further optimize the separable DST path and revisit a library-backed batched
     DST/FFT path for very large angular grids.
   - Keep the zero-boundary Eq. `(21)` semantics; do not return to periodic FFT.
@@ -79,8 +78,7 @@ the model used in the paper.
 
 - [x] Replace periodic angular FFT semantics with zero-boundary sine-series semantics.
   - Current angular diffusion uses the Eq. `(20)`-`(21)` CN eigenvalues and
-    DST-I/sine basis. Small grids use direct sine sums, medium grids use
-    separable DST kernels, and larger grids fall back to odd-extension FFT.
+    DST-I/sine basis. All angular grid sizes use separable real DST kernels.
   - Paper benchmark settings use `20x20` angular grid; current default is `11x11`.
   - Next work is performance and convergence validation, not formula replacement.
 
@@ -124,8 +122,7 @@ the model used in the paper.
   - Verify against convergence tests and Figure 1/Figure 2 style diagnostics.
 
 - [ ] Validate angular discretization at larger grids.
-  - Validate the direct sine, separable DST, and odd-extension FFT branches
-    against each other.
+  - Validate the separable DST path across small and larger angular grids.
   - Add convergence tests and optimize performance for larger angular grids.
 
 ## Validation
@@ -279,8 +276,8 @@ the model used in the paper.
   - full-grid profile.
 
 - [ ] Reduce overhead in angular diffusion.
-  - Optimize the direct sine-series kernels or replace them with a verified
-    batched odd-extension FFT/DST.
+  - Optimize the separable real DST kernels or replace them with a verified
+    library-backed batched DST.
   - Keep Eq. `(21)` zero-boundary semantics.
   - The paper `20x20` grid now uses the separable DST instead of the direct 2D
     transform, and the inverse writes directly to its final output. In the final

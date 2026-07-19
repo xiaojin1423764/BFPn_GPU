@@ -3,11 +3,15 @@
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{array}
+\usepackage{graphicx}
 \usepackage{hyperref}
 
 \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{0.45em}
+\tracinglostchars=0
+\hbadness=10000
+\hfuzz=100pt
 
 \title{代码中 Strang Splitting 离散公式整理}
 \author{}
@@ -361,153 +365,55 @@ C_g^R &\leftrightarrow& \texttt{coe[idx]}.
 \end{equation}
 供下一个低能组 \(g-1\) 使用。
 
-\subsection*{5.2 Energy Step 与三对角矩阵的关系}
+\subsection*{5.2 Energy Step 中没有显式三角矩阵}
 
-如果只看能量方向的二阶离散，例如把能量 straggling 项
-\(\partial_E(T\partial_E\psi)\) 完全隐式处理，则固定一个 \((i,j,m)\) 后，
-未知量
-\begin{equation}
-  \widehat{\boldsymbol\psi}
-  =
-  \left[
-  \widehat\psi_0,\widehat\psi_1,\ldots,\widehat\psi_{N_g-1}
-  \right]^T
-\end{equation}
-会满足典型三对角线性系统
-\begin{equation}
-  \begin{bmatrix}
-  d_0 & u_0 &        &        & 0\\
-  \ell_1 & d_1 & u_1 &        &  \\
-        & \ell_2 & d_2 & \ddots &  \\
-        &        & \ddots & \ddots & u_{N_g-2}\\
-  0     &        &        & \ell_{N_g-1} & d_{N_g-1}
-  \end{bmatrix}
-  \begin{bmatrix}
-  \widehat\psi_0\\
-  \widehat\psi_1\\
-  \widehat\psi_2\\
-  \vdots\\
-  \widehat\psi_{N_g-1}
-  \end{bmatrix}
-  =
-  \begin{bmatrix}
-  b_0\\
-  b_1\\
-  b_2\\
-  \vdots\\
-  b_{N_g-1}
-  \end{bmatrix}.
-\end{equation}
-这里
-\begin{equation}
-  \ell_g
-  \quad\text{来自 }g-1\text{ 组耦合},\qquad
-  d_g
-  \quad\text{来自本组 }g,\qquad
-  u_g
-  \quad\text{来自 }g+1\text{ 组耦合}.
-\end{equation}
-这就是通常所说的 energy 方向三对角矩阵结构。
+5.1 中的反向扫掠可以从矩阵角度理解为一个能量方向的三角递推系统：
+当前组 \(g\) 的新值只依赖已经算出的高能邻居差值
+\(\Delta_{g+1}=\widehat P_{g+1}-\widehat R_{g+1}\)。
+因此若把所有能量组一次性排成全局线性系统，它会具有三角/递推结构。
 
-但是当前 CUDA 代码没有组装上面的三对角矩阵。当前实现中 straggling 项
+但当前 CUDA 实现没有显式组装这个三角矩阵，也没有调用 Thomas 算法或通用线性求解器。
+代码采用的是 5.1 所写的逐组计算方式：先由旧值和材料系数计算
 \begin{equation}
-  \mathcal S_g
+\begin{array}{lll}
+\texttt{rhs4[idx]}, & \texttt{rhs\_base[idx]}, & \texttt{rhs\_high\_coeff[idx]},\\
+\texttt{F\_from\_f[idx]}, & \texttt{F\_from\_hi[idx]}, & \texttt{coe[idx]}.
+\end{array}
+\end{equation}
+然后在同一次 energy step 中按
+\(g=N_g-1,N_g-2,\ldots,0\) 直接计算
+\(\texttt{f\_val}\) 与 \(\texttt{F\_val}\)。
+
+也就是说，三角矩阵只是对 5.1 递推公式的等价解释；实际代码并不存储矩阵元素。
+每个能量组只使用当前组的预计算系数和上一轮反向扫掠留下的
+\texttt{next\_F}, \texttt{next\_f}：
+\begin{equation}
+  \texttt{hi\_delta}=\texttt{next\_F}-\texttt{next\_f},
+\end{equation}
+再现场计算
+\begin{equation}
+  \texttt{f\_val}
   =
-  \frac12\rho\frac{T_{g+1}}{\Delta E^2}P_{g+1}
+  \frac{
+    \texttt{rhs\_base[idx]}
+    +
+    \texttt{rhs\_high\_coeff[idx]}\cdot\texttt{hi\_delta}
+  }{
+    \texttt{coe[idx]}
+  },
+\end{equation}
+\begin{equation}
+  \texttt{F\_val}
+  =
+  \texttt{F\_from\_f[idx]}\cdot\texttt{f\_val}
   +
-  \frac12\rho\frac{T_{g-1}}{\Delta E^2}P_{g-1}
-  -
-  \rho\frac{T_g}{\Delta E^2}P_g
-\end{equation}
-使用的是旧值 \(P_{g+1},P_g,P_{g-1}\)，因此它进入右端项，而不是进入新值矩阵。
-新值部分只保留对高能邻居差值
-\(\widehat P_{g+1}-\widehat R_{g+1}\) 的依赖。
-
-把当前代码的两个未知量合并为
-\begin{equation}
-  \widehat{\mathbf x}_g
-  =
-  \begin{bmatrix}
-  \widehat P_g\\
-  \widehat R_g
-  \end{bmatrix},
-\end{equation}
-则每个能量组满足
-\begin{equation}
-  \begin{bmatrix}
-  1 & -B_g\\
-  0 & C_g^R
-  \end{bmatrix}
-  \widehat{\mathbf x}_g
+  \texttt{rhs4[idx]}
   +
-  \begin{bmatrix}
-  -C_g & C_g\\
-  -H_g & H_g
-  \end{bmatrix}
-  \widehat{\mathbf x}_{g+1}
-  =
-  \begin{bmatrix}
-  R_g^{(4)}\\
-  N_g^0
-  \end{bmatrix}.
+  \texttt{F\_from\_hi[idx]}\cdot\texttt{hi\_delta}.
 \end{equation}
-因此按 \(g=0,1,\ldots,N_g-1\) 排列，完整新值系统是 block 上双对角矩阵：
-\begin{equation}
-  \begin{bmatrix}
-  A_0 & U_0 &        &        & 0\\
-      & A_1 & U_1    &        &  \\
-      &     & A_2    & \ddots &  \\
-      &     &        & \ddots & U_{N_g-2}\\
-  0   &     &        &        & A_{N_g-1}
-  \end{bmatrix}
-  \begin{bmatrix}
-  \widehat{\mathbf x}_0\\
-  \widehat{\mathbf x}_1\\
-  \widehat{\mathbf x}_2\\
-  \vdots\\
-  \widehat{\mathbf x}_{N_g-1}
-  \end{bmatrix}
-  =
-  \begin{bmatrix}
-  \mathbf b_0\\
-  \mathbf b_1\\
-  \mathbf b_2\\
-  \vdots\\
-  \mathbf b_{N_g-1}
-  \end{bmatrix},
-\end{equation}
-其中
-\begin{equation}
-  A_g=
-  \begin{bmatrix}
-  1 & -B_g\\
-  0 & C_g^R
-  \end{bmatrix},
-  \qquad
-  U_g=
-  \begin{bmatrix}
-  -C_g & C_g\\
-  -H_g & H_g
-  \end{bmatrix},
-  \qquad
-  \mathbf b_g=
-  \begin{bmatrix}
-  R_g^{(4)}\\
-  N_g^0
-  \end{bmatrix}.
-\end{equation}
-最高能边界取
-\begin{equation}
-  \widehat{\mathbf x}_{N_g}=0,
-\end{equation}
-所以这个 block 上双对角系统可以直接从 \(g=N_g-1\) 反向扫到 \(g=0\)，不需要
-Thomas 算法，也不需要显式存储矩阵。代码中的
-\begin{equation}
-  \texttt{energyDgCnPrecomputeKernel}
-  \quad\text{和}\quad
-  \texttt{energyDgCnSolveFromPrecomputeKernel}
-\end{equation}
-正是先生成 \(A_g,U_g,\mathbf b_g\) 的等价系数，再做这个反向代入。
+随后更新
+\(\texttt{next\_F}=\texttt{F\_val}\),
+\(\texttt{next\_f}=\texttt{f\_val}\)，继续处理下一个低能组。
 
 \section*{6. Transport Step: Eq. (18), Eq. (22)，当前代码未使用 CN}
 
@@ -611,83 +517,6 @@ MUSCL slope limiter 为
 \end{equation}
 其中 \(h=\Delta x/2\)。
 
-\subsection*{6.1 Corrector Step 的代码离散式}
-
-为了和代码变量一一对应，先把通量散度记为
-\begin{equation}
-  \mathcal L_{i,j,g,m}(\Psi)
-  =
-  \frac{H^y_{i+1/2,j,g,m}(\Psi)-H^y_{i-1/2,j,g,m}(\Psi)}{\Delta y}
-  +
-  \frac{H^z_{i,j+1/2,g,m}(\Psi)-H^z_{i,j-1/2,g,m}(\Psi)}{\Delta z}.
-\end{equation}
-其中 \(H^y,H^z\) 由上面的 MUSCL limiter 和 upwind 选择得到。
-代码中的
-\begin{equation}
-  \texttt{d\_flux\_old}
-  \quad\Longleftrightarrow\quad
-  \mathcal L_{i,j,g,m}(\Psi^n),
-\end{equation}
-由
-\begin{equation}
-  \texttt{spatialFluxDivergencePlaneKernel(F, d\_flux\_old)}
-\end{equation}
-计算。
-
-predictor 先给出临时值
-\begin{equation}
-  \Psi^\ast_{i,j,g,m}
-  =
-  \Psi^n_{i,j,g,m}
-  -
-  h\,\mathcal L_{i,j,g,m}(\Psi^n).
-\end{equation}
-代码对应
-\begin{equation}
-  \texttt{spatialPredictorKernel(F, d\_flux\_old, d\_F\_pred)}.
-\end{equation}
-然后用 \(\Psi^\ast\) 重新重构 MUSCL 界面值、重新计算上风通量，得到
-\begin{equation}
-  \texttt{d\_flux\_pred}
-  \quad\Longleftrightarrow\quad
-  \mathcal L_{i,j,g,m}(\Psi^\ast),
-\end{equation}
-代码对应
-\begin{equation}
-  \texttt{spatialFluxDivergencePlaneKernel(d\_F\_pred, d\_flux\_pred)}.
-\end{equation}
-
-corrector 真正写回的新值为
-\begin{equation}
-  \boxed{
-  \Psi^{n+1}_{i,j,g,m}
-  =
-  \Psi^n_{i,j,g,m}
-  -
-  \frac{h}{2}
-  \left[
-    \mathcal L_{i,j,g,m}(\Psi^n)
-    +
-    \mathcal L_{i,j,g,m}(\Psi^\ast)
-  \right].
-  }
-\end{equation}
-这正是代码
-\begin{equation}
-  \texttt{spatialCorrectorKernel}
-\end{equation}
-中的
-\begin{equation}
-  \texttt{value = F[idx] - 0.5 * dt * (flux\_old[idx] + flux\_pred[idx])}.
-\end{equation}
-如果 \(\texttt{preserve\_sign=false}\)，代码还会做一次非负截断：
-\begin{equation}
-  \Psi^{n+1}_{i,j,g,m}
-  \leftarrow
-  \max\!\left(\Psi^{n+1}_{i,j,g,m},0\right).
-\end{equation}
-如果 \(\texttt{preserve\_sign=true}\)，则直接保留上式计算值。
-
 \section*{7. Angle Diffusion Step: Eq. (19), Eq. (20), Eq. (21)，使用 CN}
 
 固定 \((i,j,g)\)，角扩散子步求解论文 Eq. (19)：
@@ -735,92 +564,9 @@ sine 模态为
 \end{equation}
 再做 inverse sine transform 回到角网格。
 
-\subsection*{7.1 Forward / Inverse Sine Transform 的离散形式}
+\subsection*{7.1 统一角网格路径：Separable Real DST}
 
-对固定的 \((y_i,z_j,E_g)\)，把角网格上的值记为
-\begin{equation}
-  \psi_{a,b}
-  =
-  \psi(y_i,z_j,u_a,v_b,E_g),
-  \qquad
-  a=0,\ldots,N_u-1,\quad b=0,\ldots,N_v-1.
-\end{equation}
-代码中的 sine basis 为
-\begin{equation}
-  S^u_{\mu,a}
-  =
-  \sin\frac{\pi(\mu+1)(a+1)}{N_u+1},
-  \qquad
-  S^v_{\nu,b}
-  =
-  \sin\frac{\pi(\nu+1)(b+1)}{N_v+1}.
-\end{equation}
-
-forward sine transform 在数学上可写为
-\begin{equation}
-  \widetilde\psi_{\mu,\nu}
-  =
-  \frac{4}{(N_u+1)(N_v+1)}
-  r_{g,\mu,\nu}
-  \sum_{b=0}^{N_v-1}
-  \sum_{a=0}^{N_u-1}
-  \psi_{a,b}
-  S^u_{\mu,a}
-  S^v_{\nu,b}.
-\end{equation}
-这里代码把归一化因子
-\begin{equation}
-  \frac{4}{(N_u+1)(N_v+1)}
-\end{equation}
-和 CN 更新因子 \(r_{g,\mu,\nu}\) 合并到了 forward 阶段的
-\texttt{coeff\_factor} 中。
-
-inverse sine transform 回到角网格为
-\begin{equation}
-  \psi^{n+1}_{a,b}
-  =
-  \sum_{\nu=0}^{N_v-1}
-  \sum_{\mu=0}^{N_u-1}
-  \widetilde\psi_{\mu,\nu}
-  S^u_{\mu,a}
-  S^v_{\nu,b}.
-\end{equation}
-
-因此，代码中小角度网格路径 \((N_u,N_v\le32)\) 的完整 angle step 是
-\begin{equation}
-\boxed{
-  \psi^{n+1}_{a,b}
-  =
-  \sum_{\nu,\mu}
-  \left[
-    \frac{4}{(N_u+1)(N_v+1)}
-    r_{g,\mu,\nu}
-    \sum_{b',a'}
-    \psi^n_{a',b'}
-    S^u_{\mu,a'}
-    S^v_{\nu,b'}
-  \right]
-  S^u_{\mu,a}
-  S^v_{\nu,b}
-}.
-\end{equation}
-代码对应关系为
-\begin{equation}
-\begin{array}{lll}
-\texttt{sineForwardKernel} &:&
-\psi_{a,b}\rightarrow \widetilde\psi_{\mu,\nu},\\
-\texttt{buildDiffusionFactorKernel} &:&
-r_{g,\mu,\nu},\\
-\texttt{complexToRealKernel} &:&
-\frac{4}{(N_u+1)(N_v+1)}r_{g,\mu,\nu},\\
-\texttt{sineInverseKernel} &:&
-\widetilde\psi_{\mu,\nu}\rightarrow \psi^{n+1}_{a,b}.
-\end{array}
-\end{equation}
-
-\subsection*{7.2 大角度网格的推荐优化：Separable DST--GEMM}
-
-当前大角度网格路径使用 odd extension 加 2D complex FFT：
+旧的大角度网格路径使用 odd extension 加 2D complex FFT：
 \begin{equation}
   \text{pack odd extension}
   \rightarrow
@@ -841,6 +587,10 @@ r_{g,\mu,\nu},\\
   2(N_u+1)\times 2(N_v+1),
 \end{equation}
 并且使用 complex FFT，导致内存流量和 workspace 都较大。
+
+当前代码对所有角网格大小统一使用 separable real DST kernel 路径。也就是说，
+小网格不再切到 direct DST kernel，大网格也不再切到 odd-extension FFT fallback；
+所有 \(N_u,N_v\) 都按同一个 real-valued separable sine transform 流程执行。
 
 由于角扩散算子是 separable 的，
 \begin{equation}
@@ -923,30 +673,27 @@ inverse DST 为
 \item 不改变 Eq. (19)--(21) 的数学离散，只改变 sine transform 的实现方式。
 \item 避免 odd extension，不再把 \(N_u\times N_v\) 扩展到 \(2(N_u+1)\times2(N_v+1)\)。
 \item 避免 complex FFT，数据保持 real-valued。
-\item 对 \(64\times64\)、\(128\times128\) 这类中大角网格，batched GEMM 可能比当前 odd-extension FFT 更快。
+\item 对小网格和大网格使用同一条 kernel 路径，减少分支间数值验证和维护成本。
 \item CN factor multiplication 可以和中间矩阵 \(\mathbf Z\) 的写回融合，减少一次全局内存读写。
 \end{itemize}
 
-建议的实现策略是保留现有路径作为 fallback：
+当前实现策略为：
 \begin{equation}
 \begin{aligned}
-  &\text{small grid: direct DST}\\
-  &\rightarrow\ \text{medium/large grid: separable DST--GEMM}\\
-  &\rightarrow\ \text{very large grid: FFT or ADI fallback}.
+  &\text{all angular grids}\\
+  &\rightarrow\ \text{separable real DST kernels}.
 \end{aligned}
 \end{equation}
 当前代码实现采用的分支为
 \begin{equation}
 \begin{array}{lll}
-N_u,N_v\le 32 &:& \text{原 direct DST 路径},\\
-33\le \max(N_u,N_v)\le 128 &:& \text{separable real DST 路径},\\
-\max(N_u,N_v)>128 &:& \text{原 odd-extension FFT fallback}.
+\text{all }N_u,N_v &:& \text{separable real DST 路径}.
 \end{array}
 \end{equation}
 当前 separable 路径先用四个 real-valued CUDA kernel 实现上述矩阵分解；
 后续还可以进一步替换为 cuBLAS batched GEMM 或 shared-memory tiled kernel。
 
-\subsection*{7.3 Separable DST 当前实现的详细步骤}
+\subsection*{7.2 Separable DST 当前实现的详细步骤}
 
 对每个固定的 \((y_i,z_j,E_g)\)，角平面是一个实矩阵
 \begin{equation}
@@ -1112,88 +859,6 @@ S^{-1} &\Longleftrightarrow& S_v^T(\cdot)S_u.
 \end{equation}
 同理，左乘 \(S_v\) 是沿 \(v\) 方向做 forward sine transform，左乘 \(S_v^T\)
 是沿 \(v\) 方向做 inverse sine transform，右乘 \(S_u\) 是沿 \(u\) 方向做 inverse sine transform。
-
-\paragraph{sine mode 编号的含义}
-这里的 \(\mu\) 和 \(\nu\) 是 sine mode 编号，也就是正弦基函数的编号。
-在 \(u\) 方向，原始网格点编号是
-\begin{equation}
-  a=0,\ldots,N_u-1,
-\end{equation}
-而 sine mode 编号是
-\begin{equation}
-  \mu=0,\ldots,N_u-1.
-\end{equation}
-第 \(\mu\) 个 mode 对应的基函数为
-\begin{equation}
-  \sin\frac{\pi(\mu+1)(a+1)}{N_u+1}.
-\end{equation}
-例如
-\begin{equation}
-\begin{array}{lll}
-\mu=0 &:& \displaystyle \sin\frac{\pi(a+1)}{N_u+1},\\begin{equation}0.7em]
-\mu=1 &:& \displaystyle \sin\frac{2\pi(a+1)}{N_u+1},\\begin{equation}0.7em]
-\mu=2 &:& \displaystyle \sin\frac{3\pi(a+1)}{N_u+1}.
-\end{array}
-\end{equation}
-低 mode 表示沿 \(u\) 方向变化较慢的正弦波，高 mode 表示变化较快的正弦波。
-在 \(v\) 方向同理，\(\nu\) 是 \(v\) 方向的 sine mode 编号。
-
-forward sine transform 的作用就是把角网格值
-\begin{equation}
-  \psi(u_a,v_b)
-\end{equation}
-转换成 mode 系数
-\begin{equation}
-  \widetilde\psi_{\mu,\nu}.
-\end{equation}
-使用 sine mode 的原因是：在零边界条件下，离散角 Laplacian
-\begin{equation}
-  \partial_{uu}+\partial_{vv}
-\end{equation}
-在 sine mode 空间中是对角的。因此 Eq. (19) 的 angle diffusion step 不需要解一个大的角空间矩阵，
-而是对每个 mode \((\mu,\nu)\) 直接乘一个 CN 因子
-\begin{equation}
-  r_{g,\mu,\nu}.
-\end{equation}
-
-\paragraph{DST 和 CN 的区别}
-DST 的全称是 Discrete Sine Transform，即离散正弦变换。它不是时间推进格式，
-而是一种空间/角变量上的基变换：
-\begin{equation}
-  \psi_{a,b}
-  \longrightarrow
-  \widetilde\psi_{\mu,\nu}.
-\end{equation}
-在本问题中，DST 的作用是把零边界条件下的角 Laplacian 对角化。
-
-CN 的全称是 Crank--Nicolson。它是 \(x\) 方向推进时对 angle diffusion 方程的深度离散格式。
-如果直接在角网格空间写 CN，会得到矩阵方程
-\begin{equation}
-  \left(I-\frac{\Delta x}{2}D_g L\right)\psi^{n+1}
-  =
-  \left(I+\frac{\Delta x}{2}D_g L\right)\psi^n,
-\end{equation}
-其中 \(L\) 是角空间离散 Laplacian 矩阵。
-
-使用 DST 后，相当于利用
-\begin{equation}
-  L = S^{-1}\Lambda S
-\end{equation}
-把这个矩阵系统对角化。于是 CN 更新不再需要求解大矩阵，而是在每个 sine mode 上做逐元素乘法：
-\begin{equation}
-  \widetilde\psi^{\,n+1}_{\mu,\nu}
-  =
-  r_{g,\mu,\nu}
-  \widetilde\psi^{\,n}_{\mu,\nu}.
-\end{equation}
-因此二者分工是：
-\begin{equation}
-\begin{array}{lll}
-\text{DST} &:& \text{变换工具，把角 Laplacian 对角化},\\
-\text{CN} &:& \text{深度推进格式，给出每个 mode 的更新因子 }r_{g,\mu,\nu}.
-\end{array}
-\end{equation}
-当前 separable 路径用矩阵乘法实现 DST；CN 本身在 mode 空间只是逐 mode 乘系数。
 
 \paragraph{CN 矩阵方程的来源}
 angle diffusion 子步的连续方程是
@@ -1534,104 +1199,337 @@ angle diffusion 子步的连续方程是
 \end{equation}
 它和原来的 sine/CN 离散数学上是一致的；区别只是没有通过 odd extension 和 complex FFT 实现。
 
-\section*{8. Energy 和 Transport 是否解矩阵}
+\section*{8. 当前 CUDA 并行流程与 streaming 优化}
 
-\subsection*{8.1 Energy Step 是否解矩阵}
+本节按当前代码实现说明并行映射。令
+\begin{equation}
+  N_{yz}=(N_y+1)(N_z+1),\qquad
+  N_\Omega=N_\mu N_\omega,\qquad
+  N_{\mathrm{lane}}=N_{yz}N_\Omega.
+\end{equation}
+代码中的主要一维存储布局为
+\begin{equation}
+  \texttt{idx}=(gN_{yz}+s)N_\Omega+m,
+\end{equation}
+其中 \(s=j(N_y+1)+i\)，\(m\) 是角度编号。
 
-energy step 对应 Eq. (15)，本质上来自一个沿能量组耦合的 DG/CN 离散系统。
-如果把所有能量组同时写出来，它可以看成一个按能量方向耦合的线性代数系统。
-但当前代码没有显式组装全局矩阵，也没有调用通用矩阵求解器。
+\subsection*{8.1 Energy step 的并行流程}
 
-当前实现利用能量方向的上风/三角结构，从高能组到低能组反向扫掠：
+energy step 的关键 kernel 是 \texttt{streamingEnergyDgCnKernel}。
+streaming 模式中先按 lane 切块，\texttt{lane\_chunk} 会按 \(N_\Omega\) 对齐，使一个 chunk 不切断角平面。
+每个 CUDA block 使用 256 个 thread：
+\begin{equation}
+  \texttt{lane}=\texttt{blockIdx.x}\cdot256+\texttt{threadIdx.x}.
+\end{equation}
+一个 thread 负责一个固定的 \((y,z,\Omega)\) lane，然后在该 lane 内从高能到低能串行扫掠
 \begin{equation}
   g=N_g-1,N_g-2,\ldots,0.
 \end{equation}
-每个能量组只需要已知的高能邻居新值差
-\begin{equation}
-  \Delta_{g+1}
-  =
-  \widehat P_{g+1}-\widehat R_{g+1},
-\end{equation}
-然后局部求
-\begin{equation}
-  \widehat R_g
-  =
-  \frac{N_g^0+H_g\Delta_{g+1}}{C_g^R},
-  \qquad
-  \widehat P_g
-  =
-  B_g\widehat R_g+R_g^{(4)}+C_g\Delta_{g+1}.
-\end{equation}
-因此：
-\begin{equation}
-  \boxed{
-  \text{Energy step 等价于求解一个能量方向的三角/递推系统，但代码没有显式组装矩阵。}
-  }
-\end{equation}
-代码对应：
-\begin{equation}
-  \texttt{energyDgCnPrecomputeKernel}
-  \quad+\quad
-  \texttt{energyDgCnSolveFromPrecomputeKernel}.
-\end{equation}
+这样做的原因是 Eq. (15) 的新值依赖高能邻居新值差
+\(\widehat P_{g+1}-\widehat R_{g+1}\)。这个依赖沿能量方向是递推关系，不能直接把同一个 lane
+的所有能量组完全并行化；当前实现把并行度放在 \(N_{yz}N_\Omega\) 个 lane 上。
 
-\subsection*{8.2 Transport Step 是否解矩阵}
+每个 thread 在寄存器中保留
+\begin{equation}
+  \texttt{next\_F},\qquad \texttt{next\_f},
+\end{equation}
+分别表示已算出的高能邻居 \(\widehat P_{g+1},\widehat R_{g+1}\)。对当前能量组 \(g\)，thread 从
+chunk 内连续内存读取 \(F_g,f_g,F_{g+1},f_{g+1}\) 以及需要的材料系数，计算 Eq. (15) 的局部系数，
+写出 \(\widehat P_g,\widehat R_g\)，再更新 \texttt{next\_F}, \texttt{next\_f}。
 
-transport step 当前不是矩阵求解。它对 Eq. (18), Eq. (22) 的 \(YZ\) 对流子步使用显式
-MUSCL predictor--corrector：
+二次粒子 energy half-step 需要先由当前主粒子分布构造 catastrophic secondary source。
+对一个固定输出 \((g,s,m)\)，代码实现的离散形式可概括为
 \begin{equation}
-  \psi^\ast
+  Q_{g,s,m}
   =
-  \psi^n-hL_1(\psi^n),
-\end{equation}
-\begin{equation}
-  \psi^{n+1}
-  =
-  \psi^n
-  -
-  \frac{h}{2}
+  \Delta E
+  \sum_{g'=g_{\min}(g)}^{g_{\max}(g)-1}
+  \sum_{m'\in\mathcal I(g',m)}
   \left[
-    L_1(\psi^n)+L_1(\psi^\ast)
-  \right].
-\end{equation}
-这里没有求解
-\begin{equation}
-  \psi^{n+1}
-  =
-  \psi^n
-  -
-  \frac{h}{2}
-  \left[
-    L_1(\psi^n)+L_1(\psi^{n+1})
+    K^{E,1}_{g,g'}\max(\psi^1_{p,g',s,m'},0)
+    +
+    \frac13 K^{E,2}_{g,g'}\psi^2_{p,g',s,m'}
   \right]
+  K^\Omega_{g',m',m}.
 \end{equation}
-这样的隐式/CN 空间耦合系统。因此：
-\begin{equation}
-  \boxed{
-  \text{Transport step 当前不解矩阵，只做显式通量计算和显式更新。}
-  }
-\end{equation}
-代码对应：
+这里 \(s\) 是同一个 \(y,z\) cell；source 不在横向空间上耦合，只在能量和角度上从主粒子分布向二次粒子分布积分。
+
+streaming 模式下，二次 source 的数据流为：
 \begin{equation}
 \begin{array}{c}
-  \texttt{spatialFluxDivergencePlaneKernel}\\
-  \downarrow\\
-  \texttt{spatialPredictorKernel}\\
-  \downarrow\\
-  \texttt{spatialFluxDivergencePlaneKernel}\\
-  \downarrow\\
-  \texttt{spatialCorrectorKernel}.
+\text{read primary }(\psi^1_p,\psi^2_p)\text{ lane chunk}\\
+\downarrow\\
+\text{copy to GPU temporary buffers}\\
+\downarrow\\
+\texttt{streamingSecondarySourceTiledEnergyKernel<4>}\\
+\downarrow\\
+\text{source buffer passed directly to } \texttt{streamingEnergyDgCnKernel}.
 \end{array}
 \end{equation}
+也就是说，source 不先写成一个完整的全局数组再读回来；它在当前 lane chunk 的 GPU workspace 中生成，
+随后立即作为二次粒子 Eq. (15) 右端项使用。
 
-\section*{9. 当前实现中的重要差异}
+\texttt{streamingSecondarySourceTiledEnergyKernel<4>} 的 grid 为
+\begin{equation}
+  \texttt{grid.x}=\left\lceil\frac{\texttt{lanes}}{256}\right\rceil,\qquad
+  \texttt{grid.y}=\left\lceil\frac{N_g^{\mathrm{active}}}{4}\right\rceil.
+\end{equation}
+其中
+\begin{equation}
+  \texttt{lane}=\texttt{blockIdx.x}\cdot256+\texttt{threadIdx.x},\qquad
+  g_0=4\cdot\texttt{blockIdx.y}.
+\end{equation}
+一个 thread 对应一个固定 lane，即固定的 \((s,m)\)，但一次最多累计 4 个相邻输出能量组
+\(g_0,g_0+1,g_0+2,g_0+3\)。这就是模板参数 \(\texttt{OUT\_TILE}=4\) 的含义。
+thread 在寄存器中保留
+\begin{equation}
+  q_1[4],\qquad q_2[4],
+\end{equation}
+分别累计 \(\psi^1\) 和 \(\psi^2\) 对 source 的贡献。
 
+能量方向的优化来自 \texttt{ker\_e\_begin} 和 \texttt{ker\_e\_end}。
+对每个输出能量 \(g\)，并不是所有入射能量 \(g'\) 都有非零贡献；代码预先为每个 \(g\) 保存有效范围
+\begin{equation}
+  g'\in
+  [\texttt{ker\_e\_begin[g]},\texttt{ker\_e\_end[g]}).
+\end{equation}
+kernel 对 4 个输出能量组取这些范围的并集，只遍历可能非零的 \(g'\)。进入某个 \(g'\) 后，
+thread 先读出该 \(g'\) 对 4 个输出能量组的 \(K^{E,1},K^{E,2}\)；如果 4 组全为零，就直接跳过该
+\(g'\)。
+
+角度方向的优化来自 sparse column 存储。对固定入射能量 \(g'\) 和输出角 \(m\)，代码不用遍历所有
+\(m'=0,\ldots,N_\Omega-1\)，而是通过
+\begin{equation}
+  \texttt{ker\_v\_col\_ptr[g',m]}
+  \;\rightarrow\;
+  \texttt{ker\_v\_col\_ptr[g',m+1]}
+\end{equation}
+得到非零角权重列表。每个非零项给出一个输入角偏移 \(\texttt{ker\_v\_in\_idx[p]}\) 和权重
+\(\texttt{ker\_v\_sparse\_values[p]}\)。由于 lane chunk 按 \(N_\Omega\) 对齐，thread 可以用
+\begin{equation}
+  \texttt{lane\_base}=\texttt{lane}-m
+\end{equation}
+定位同一个 \(y,z\) cell 下的各个输入角，读取
+\(\psi^1_{p,g',s,m'}\) 和 \(\psi^2_{p,g',s,m'}\)。角向求和先形成
+\begin{equation}
+  A_1(g')=\sum_{m'} \max(\psi^1_{p,g',s,m'},0)K^\Omega_{g',m',m},
+  \qquad
+  A_2(g')=\sum_{m'} \psi^2_{p,g',s,m'}K^\Omega_{g',m',m}.
+\end{equation}
+然后同一个 \(A_1,A_2\) 同时贡献给 4 个输出能量组：
+\begin{equation}
+  q_1[t]\mathrel{+}=A_1(g')K^{E,1}_{g_0+t,g'},\qquad
+  q_2[t]\mathrel{+}=A_2(g')K^{E,2}_{g_0+t,g'}.
+\end{equation}
+最后写出
+\begin{equation}
+  \texttt{source\_F[(g\_0+t)*lanes + lane]}
+  =
+  \Delta E\left(q_1[t]+\frac13 q_2[t]\right).
+\end{equation}
+
+这样做的主要收益是三点：第一，source 的输出能量按 4 组 tile 复用同一次角向求和；
+第二，能量核和角核都跳过零项，避免稠密 \(N_gN_\Omega\) 遍历；
+第三，source buffer 只在当前 streaming chunk 内存在，直接喂给二次粒子的 energy recurrence，
+减少一次完整 backing-store source 文件读写。
+
+\subsection*{8.2 Transport step 的并行流程}
+
+transport step 使用显式 MUSCL predictor--corrector。对每个输入数组执行四个 kernel：
+\begin{equation}
+\begin{array}{c}
+\texttt{spatialFluxDivergencePlaneKernel(F, flux\_old)}\\
+\downarrow\\
+\texttt{spatialPredictorKernel(F, flux\_old, F\_pred)}\\
+\downarrow\\
+\texttt{spatialFluxDivergencePlaneKernel(F\_pred, flux\_pred)}\\
+\downarrow\\
+\texttt{spatialCorrectorKernel(F, flux\_old, flux\_pred, F)}.
+\end{array}
+\end{equation}
+其中 \(\psi^1\) 和 \(\psi^2\) 两个 DG 系数各调用一次 transport solver；\(\psi^1\) 默认做空间非负截断，
+\(\psi^2\) 保留符号。
+
+\texttt{spatialFluxDivergencePlaneKernel} 的 block 组织不是简单对全数组一维铺开，而是按
+\((g,\Omega)\) plane 和 \(yz\) tile 组织：
+\begin{equation}
+  \texttt{plane}=\left\lfloor
+  \frac{\texttt{blockIdx.x}}{\lceil N_{yz}/256\rceil}
+  \right\rfloor,\qquad
+  \texttt{s}=\texttt{yz\_block}\cdot256+\texttt{threadIdx.x}.
+\end{equation}
+因此一个 thread 负责一个固定的 \((g,\Omega,y,z)\) 网格点，读取 \(y,z\) 方向相邻点，
+计算 limiter、左右界面上风通量和通量散度。predictor/corrector kernel 则是一维全数组映射：
+一个 thread 更新一个 \(\texttt{idx}\)。
+
+\subsection*{8.3 Angle step 的并行流程}
+
+angle step 对每个固定的 \((g,y,z)\) 角平面做 sine/DST 对角化和 CN mode 更新。
+当前代码不再按角网格大小选择 direct/FFT fallback，而是对所有大小统一走 separable
+real DST kernel 路径：
+\begin{equation}
+\begin{array}{lll}
+\text{all }N_u,N_v
+&:& \text{separable real DST kernel}.
+\end{array}
+\end{equation}
+本文档中的 \(N_\mu=N_\omega=7\) 小网格和图中的 \(9\times9\) case 都使用 separable
+real DST。
+
+separable 路径中，每个 kernel 仍用 256-thread block 一维铺开
+\(\texttt{batch}\times N_\Omega\) 个任务，其中 \(\texttt{batch}=N_gN_{yz}\)。
+四个 kernel 分别完成
+\begin{equation}
+  \mathbf Y=\mathbf\Psi S_u^T,\quad
+  \mathbf Z=\mathbf R_g\odot(\alpha S_v\mathbf Y),\quad
+  \mathbf W=S_v^T\mathbf Z,\quad
+  \mathbf\Psi_{\mathrm{new}}=\mathbf W S_u.
+\end{equation}
+每个 thread 计算一个输出元素，沿一个维度做短循环。相对 odd-extension FFT，这条路径避免了
+\(2(N_u+1)\times2(N_v+1)\) 的扩展网格和 complex workspace，数据保持 real-valued。
+
+\subsection*{8.4 Streaming 数据读取、缓存与流水}
+
+\texttt{--streaming-full} 不把完整四个相空间数组常驻 GPU，而是把
+\(\psi^1_p,\psi^2_p,\psi^1_s,\psi^2_s\) 存在 host backing store 文件中。
+backing store 是 \texttt{--stream-dir} 目录下的临时二进制文件，逻辑上保存完整相空间数组：
+\begin{equation}
+\begin{array}{lll}
+\texttt{stream\_F.bin}   &:& \psi^1_p,\\
+\texttt{stream\_f\_F.bin} &:& \psi^2_p,\\
+\texttt{stream\_F1.bin}  &:& \psi^1_s,\\
+\texttt{stream\_f\_F1.bin}&:& \psi^2_s.
+\end{array}
+\end{equation}
+这些文件用 \texttt{pread}/\texttt{pwrite} 按元素偏移随机读写。代码用
+\texttt{getStoreFd} 缓存文件描述符 \(\texttt{fd}\)，避免每个 chunk 反复
+\texttt{open}/\texttt{close}，但这只是文件句柄缓存，不是数据缓存。
+
+每次处理一个 chunk 的数据路径为：
+\begin{equation}
+  \text{backing store}
+  \rightarrow
+  \text{pinned host buffer}
+  \rightarrow
+  \text{GPU workspace}
+  \rightarrow
+  \text{pinned host buffer}
+  \rightarrow
+  \text{backing store}.
+\end{equation}
+
+pinned host buffer 由 \texttt{HostDoubleBuffer} 管理。它优先调用
+\texttt{cudaMallocHost} 分配 page-locked host memory；如果分配失败，才退回普通 pageable
+\texttt{std::vector<double>}。pinned memory 的作用是作为 CPU 和 GPU 之间的高速 staging buffer，
+让 \texttt{cudaMemcpyAsync} 可以更高效地做 host-to-device 和 device-to-host 拷贝。
+
+需要特别说明：当前 pinned host buffer 不是 LRU cache。它不记录最近访问的 chunk，
+也不保存多个历史 chunk 以供命中复用。它只是固定数量的临时装载区：
+\begin{equation}
+\begin{array}{lll}
+\texttt{h\_stream\_lane},\ \texttt{h\_stream\_chunk}
+&:& \psi^1\text{ 的两个 staging slot},\\
+\texttt{h\_stream\_f\_lane},\ \texttt{h\_stream\_f\_chunk}
+&:& \psi^2\text{ 的两个 staging slot},\\
+\texttt{h\_stream\_primary\_lane},\ \texttt{h\_stream\_primary\_f\_lane}
+&:& \text{二次 source 读取主粒子时的 staging buffer}.
+\end{array}
+\end{equation}
+当处理下一个 chunk 时，这些 buffer 会被新数据覆盖；旧 chunk 是否还在 backing store 中，
+只由文件保存，不由 host buffer 缓存。
+
+双缓冲的流水方式如下。第 \(k\) 个 chunk 使用
+\(\texttt{slot}=k\bmod2\)。如果这个 slot 上一次还有异步写回未完成，代码先等待
+\texttt{pending\_write[slot].get()}。随后读入当前 chunk 的 \(F\) 和 \(f\)：
+\begin{equation}
+\begin{array}{c}
+\texttt{std::async(read f)}\\
+\texttt{read F on current thread}\\
+\texttt{wait for f read}
+\end{array}
+\end{equation}
+读完后用 \texttt{cudaMemcpyAsync} 把两组 host buffer 拷到 GPU workspace。GPU kernel 完成后，
+结果再异步拷回同一个 slot 的 host buffer。最后，写回 backing store 时再次并行写 \(F\) 和 \(f\)：
+\begin{equation}
+\begin{array}{c}
+\texttt{pending\_write[slot] = std::async(...)}\\
+\quad \texttt{std::async(write f)}\\
+\quad \texttt{write F on write task}\\
+\quad \texttt{wait for f write}.
+\end{array}
+\end{equation}
+因此它优化的是 I/O 与 GPU 计算之间的重叠，以及 \(F/f\) 两个文件之间的并行读写，
+不是通过 LRU 命中减少读取。
+
+energy step 和 transport/angle step 的 chunk 方向不同。energy step 按 lane chunk 读取：
+\begin{equation}
+  \text{chunk shape}\approx N_g^{\mathrm{active}}\times N_{\mathrm{lane,chunk}}.
+\end{equation}
+这样每个 GPU thread 可以拿到一个 lane 上连续的能量列，并从高能到低能做 Eq. (15) 递推。
+transport/angle step 按 energy chunk 读取：
+\begin{equation}
+  \text{chunk shape}\approx N_{g,\mathrm{chunk}}\times N_{yz}\times N_\Omega.
+\end{equation}
+这样一个 chunk 内包含若干完整能量组的 \((y,z,\Omega)\) 平面，适合 transport 的 \(y,z\)
+邻点访问和 angle 的每个 \((g,y,z)\) 角平面 DST。
+
+当前真正具有“状态复用”含义的是两类轻量元数据，而不是 pinned data cache。第一类是
+\texttt{stream\_max\_active\_energy}。它记录每个 backing store 当前还可能非零的最高能量组。
+如果高能组已经衰减为空，后续 streaming energy step 只读取
+\begin{equation}
+  N_g^{\mathrm{active}}
+  =
+  \max(1,\texttt{stream\_max\_active\_energy}+1)
+\end{equation}
+个低能/活跃能量组。超过这个范围的 chunk 直接跳过，profile 中记为 zero chunk skip。
+第二类是已打开文件描述符 \(\texttt{stream\_fds}\)，它复用文件句柄而不是复用数组数据。
+
+二次 source 还有一个可选的 source backing file 设计，但当前运行中
+\texttt{secondary source cache off}。也就是说代码选择在需要二次 source 时从主粒子 backing store
+读取当前 chunk，直接在 GPU 上重算 source，并把 source buffer 立即传给二次粒子的 energy recurrence。
+这样通常比把完整 source 写成 backing store 文件、下一半步再读回来更省 I/O。
+
+IDD 计算与最后一次 energy 写回融合：同一个 chunk 中先执行
+\texttt{pairDepthDoseLaneKernel} 和 GPU reduction，再把更新后的 chunk 拷回 host。
+这样避免为了 IDD 单独再扫一遍完整 backing store。
+
+\paragraph{后续数据复用优化方向}
+因此，当前 streaming 优化可以概括为：
+\begin{equation}
+  \text{out-of-core staging}
+  +
+  \text{I/O/compute overlap}
+  +
+  \text{zero chunk skip},
+\end{equation}
+而不是 cache-based data reuse。也就是说，pinned host buffer 和双缓冲主要减少等待时间，
+并没有让同一个 chunk 在多个子步或多个 depth step 之间被反复命中复用。
+
+后续若要继续降低 backing-store 流量，优先方向不是简单增加一个 host LRU cache，
+而是重排 streaming schedule，让同一份数据在 GPU 上停留更久。可考虑的方案包括：
 \begin{itemize}
-\item transport step 不使用 \(\sigma_c\)、\(S(E)\)、\(T(E)\)；这些只进入 Eq. (15) energy step 和 secondary source。
-\item transport step 当前是显式 predictor--corrector，不是隐式迭代，也不是当前代码中的 CN 子步。
-\item angle step 使用 Eq. (19)--(21) 的谱空间 CN 更新；传入的是完整步 \(\Delta x\)。
-\item energy step 使用 Eq. (15) 的 DG/CN 递推；传入的是半步 \(\Delta x/2\)。
-\item 因此，当前代码中实际使用 CN 的地方只有 \(\mathcal E\) energy step 和 \(\mathcal A\) angle diffusion step。
+\item \textbf{GPU residency 延长：} 一个 chunk 读入 GPU 后，尽量在写回前完成更多连续子步，
+例如把局部可行的 transport--angle--transport--energy 边界处理融合到同一次 residency 中。
+\item \textbf{统一 chunk 方向：} 当前 energy 按 lane chunk，transport/angle 按 energy chunk。
+两种 chunk 方向之间切换会导致反复回到 backing store。若能设计统一或分层 chunk layout，
+可减少跨子步重读。
+\item \textbf{GPU resident active cache：} 对仍活跃、即将再次访问的 chunk 保留在 GPU workspace
+或一个受限 GPU cache 中，而不是每个子步都写回文件再读出。这里需要显式处理容量限制和写回一致性。
+\item \textbf{host LRU cache 作为次选：} host 侧 LRU 可以减少磁盘读写，但仍要经过 H2D/D2H；
+只有当 backing store I/O 明显成为瓶颈且 GPU residency 难以继续延长时才值得实现。
+\item \textbf{source 与 IDD 继续融合：} 当前 source 已经避免完整 source backing file，IDD 也与
+energy 写回融合；后续可继续检查其它 diagnostics 是否还能合并到已有 chunk pass 中。
 \end{itemize}
+
+优先级上，最有价值的是减少 chunk 被写回后又立即读出的次数，也就是优化数据在 GPU 上的
+resident time，而不是单纯扩大 pinned host buffer。
+
+\section*{9. 小网格计时、IDD 与 Table 2 对比}
+
+\IfFileExists{benchmark_summary.tex}{%
+  \input{benchmark_summary.tex}%
+}{%
+  \input{results/transport_formula/benchmark_summary.tex}%
+}
 
 \end{document}
